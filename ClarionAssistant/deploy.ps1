@@ -74,6 +74,9 @@ $LspNodeModules = @(
     "xml2js"
     "sax"
     "xmlbuilder"
+    "better-sqlite3"
+    "bindings"
+    "file-uri-to-path"
 )
 
 # SQLite DLLs with FTS5 support (from lib/sqlite-fts5 in project)

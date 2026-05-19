@@ -1,9 +1,9 @@
-; Clarion Assistant v4.6.1 Installer
+; Clarion Assistant v4.6.2 Installer
 ; Inno Setup 6 Script
 ; Supports Clarion 10, 11, 12 — user picks which version(s) to install
 
 #define MyAppName "Clarion Assistant"
-#define MyAppVersion "4.6.1"
+#define MyAppVersion "4.6.2"
 #define MyAppPublisher "ClarionLive"
 #define MyAppURL "https://clarionlive.com"
 
@@ -136,6 +136,9 @@ Source: "{#SrcLsp}\node_modules\vscode-languageserver-types\*"; DestDir: "{code:
 Source: "{#SrcLsp}\node_modules\xml2js\*"; DestDir: "{code:GetC10Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\xml2js"; Components: clarion10 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SrcLsp}\node_modules\sax\*"; DestDir: "{code:GetC10Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\sax"; Components: clarion10 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SrcLsp}\node_modules\xmlbuilder\*"; DestDir: "{code:GetC10Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\xmlbuilder"; Components: clarion10 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SrcLsp}\node_modules\better-sqlite3\*"; DestDir: "{code:GetC10Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\better-sqlite3"; Components: clarion10 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SrcLsp}\node_modules\bindings\*"; DestDir: "{code:GetC10Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\bindings"; Components: clarion10 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SrcLsp}\node_modules\file-uri-to-path\*"; DestDir: "{code:GetC10Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\file-uri-to-path"; Components: clarion10 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; --- Clarion 11 Addin ---
 Source: "{#SrcC11}\ClarionAssistant.dll"; DestDir: "{code:GetC11Path}\accessory\addins\ClarionAssistant"; Components: clarion11; Flags: ignoreversion
@@ -177,6 +180,9 @@ Source: "{#SrcLsp}\node_modules\vscode-languageserver-types\*"; DestDir: "{code:
 Source: "{#SrcLsp}\node_modules\xml2js\*"; DestDir: "{code:GetC11Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\xml2js"; Components: clarion11 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SrcLsp}\node_modules\sax\*"; DestDir: "{code:GetC11Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\sax"; Components: clarion11 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SrcLsp}\node_modules\xmlbuilder\*"; DestDir: "{code:GetC11Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\xmlbuilder"; Components: clarion11 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SrcLsp}\node_modules\better-sqlite3\*"; DestDir: "{code:GetC11Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\better-sqlite3"; Components: clarion11 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SrcLsp}\node_modules\bindings\*"; DestDir: "{code:GetC11Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\bindings"; Components: clarion11 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SrcLsp}\node_modules\file-uri-to-path\*"; DestDir: "{code:GetC11Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\file-uri-to-path"; Components: clarion11 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; --- Clarion 12 Addin ---
 Source: "{#SrcC12}\ClarionAssistant.dll"; DestDir: "{code:GetC12Path}\accessory\addins\ClarionAssistant"; Components: clarion12; Flags: ignoreversion
@@ -218,6 +224,9 @@ Source: "{#SrcLsp}\node_modules\vscode-languageserver-types\*"; DestDir: "{code:
 Source: "{#SrcLsp}\node_modules\xml2js\*"; DestDir: "{code:GetC12Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\xml2js"; Components: clarion12 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SrcLsp}\node_modules\sax\*"; DestDir: "{code:GetC12Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\sax"; Components: clarion12 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SrcLsp}\node_modules\xmlbuilder\*"; DestDir: "{code:GetC12Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\xmlbuilder"; Components: clarion12 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SrcLsp}\node_modules\better-sqlite3\*"; DestDir: "{code:GetC12Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\better-sqlite3"; Components: clarion12 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SrcLsp}\node_modules\bindings\*"; DestDir: "{code:GetC12Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\bindings"; Components: clarion12 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SrcLsp}\node_modules\file-uri-to-path\*"; DestDir: "{code:GetC12Path}\accessory\addins\ClarionAssistant\lsp-server\node_modules\file-uri-to-path"; Components: clarion12 and lsp; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; --- COM for Clarion: IDE Addin (installs to whichever Clarion version is selected — uses C12 path) ---
 Source: "{#SrcComForClarion}\ClarionCOMBrowser.dll"; DestDir: "{code:GetPrimaryClarionPath}\accessory\addins\ComForClarion"; Components: comforclarion\addin; Flags: ignoreversion
