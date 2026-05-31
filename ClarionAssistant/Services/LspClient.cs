@@ -60,6 +60,38 @@ namespace ClarionAssistant.Services
         public bool IsRunning { get { return _running && _process != null && !_process.HasExited; } }
 
         /// <summary>
+        /// The most-recently-started LspClient. The app runs a single language
+        /// server, so embeditor features that aren't owned by McpToolRegistry
+        /// (e.g. the embeditor completion provider) can reach the live, initialized
+        /// client through this. Set on a successful Start(); cleared on Stop().
+        ///
+        /// Backed by a volatile field so the UI-thread reader sees a consistent
+        /// publication of the reference across Start()/Stop() on another thread.
+        /// (Consumers still snapshot it into a local and re-check IsRunning.)
+        /// </summary>
+        private static volatile LspClient _active;
+        public static LspClient Active { get { return _active; } private set { _active = value; } }
+
+        /// <summary>
+        /// Diagnostic string describing the outcome of the most recent GetCompletion call
+        /// (sent / timeout / parsed N / etc.). Surfaced in the embeditor completion-test
+        /// result file to diagnose why the LSP source contributed 0 items.
+        /// </summary>
+        public string LastCompletionDiagnostic { get; private set; }
+
+        // Hard caps so a misbehaving/compromised local server or a corrupt CodeGraph DB
+        // can't hang or exhaust the IDE through an unbounded completion payload.
+        private const int MaxCompletionItems = 5000;
+        private const int MaxLabelLen = 256;
+        private const int MaxTextLen = 4096;
+
+        private static string Cap(string s, int max)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length <= max) return s;
+            return s.Substring(0, max);
+        }
+
+        /// <summary>
         /// Set clarion/updatePaths data to be sent after LSP initialization.
         /// Must be called before Start().
         /// </summary>
@@ -172,6 +204,7 @@ namespace ClarionAssistant.Services
                 Thread.Sleep(1000);
 
                 System.Diagnostics.Debug.WriteLine("[LSP] Ready");
+                Active = this;
                 return true;
             }
             catch (Exception ex)
@@ -261,6 +294,7 @@ namespace ClarionAssistant.Services
             }
 
             _process = null;
+            if (ReferenceEquals(Active, this)) Active = null;
 
             // Release diagnostic events.
             lock (_diagnosticsLock)
@@ -298,10 +332,19 @@ namespace ClarionAssistant.Services
         /// <summary>
         /// textDocument/hover - get hover info (type, signature, docs).
         /// </summary>
-        public Dictionary<string, object> GetHover(string filePath, int line, int character)
+        public Dictionary<string, object> GetHover(string filePath, int line, int character, string bufferText = null)
         {
             TrackRequest("hover", filePath);
-            return SendTextDocumentPositionRequest("textDocument/hover", filePath, line, character);
+            // Buffer-aware like GetCompletion: sync the live embeditor text so hover resolves
+            // against current content; else open from disk. Short timeout (UI-thread call).
+            try
+            {
+                if (!string.IsNullOrEmpty(bufferText)) EnsureDocumentOpenWithText(filePath, bufferText);
+                else EnsureDocumentOpen(filePath);
+            }
+            catch { }
+            var parms = BuildTextDocumentPosition(filePath, line, character);
+            return SendRequest("textDocument/hover", parms, 1500);
         }
 
         /// <summary>
@@ -341,6 +384,101 @@ namespace ClarionAssistant.Services
             var parms = BuildTextDocumentPosition(filePath, line, character);
             parms["newName"] = newName;
             return SendRequest("textDocument/rename", parms, 8000);
+        }
+
+        /// <summary>
+        /// textDocument/completion - get completion items at a position. Returns a
+        /// parsed (possibly empty) list. The server tolerates a missing document and
+        /// still returns context-free language items, so this works for the embeditor
+        /// case where the live buffer is not identical to any file on disk.
+        ///
+        /// Uses a short timeout because it is called synchronously from the editor's
+        /// completion code path (UI thread).
+        /// </summary>
+        public List<CompletionItemInfo> GetCompletion(string filePath, int line, int character, int timeoutMs = 2500, string bufferText = null)
+        {
+            var items = new List<CompletionItemInfo>();
+            if (!IsRunning) { LastCompletionDiagnostic = "client not running"; return items; }
+            TrackRequest("completion", filePath);
+
+            // If the caller supplies the live buffer (the embeditor case — its generated
+            // source isn't on disk), sync that text to the server so it can tokenize and
+            // do scope-aware completion (in-scope locals/params). Otherwise fall back to
+            // opening from disk. Server tolerates neither being present (context-free set).
+            try
+            {
+                if (!string.IsNullOrEmpty(bufferText)) EnsureDocumentOpenWithText(filePath, bufferText);
+                else EnsureDocumentOpen(filePath);
+            }
+            catch { }
+
+            var parms = BuildTextDocumentPosition(filePath, line, character);
+            var uri = ((Dictionary<string, object>)parms["textDocument"])["uri"] as string;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var response = SendRequest("textDocument/completion", parms, timeoutMs);
+            sw.Stop();
+
+            if (response == null)
+            {
+                LastCompletionDiagnostic = "no response after " + sw.ElapsedMilliseconds + "ms (timeout=" + timeoutMs + "ms); uri=" + uri;
+                return items;
+            }
+            if (response.ContainsKey("error"))
+            {
+                LastCompletionDiagnostic = "server error: " + _serializer.Serialize(response["error"]);
+                return items;
+            }
+            if (!response.ContainsKey("result") || response["result"] == null)
+            {
+                LastCompletionDiagnostic = "no 'result' (keys: " + string.Join(",", new List<string>(response.Keys).ToArray()) + ") in " + sw.ElapsedMilliseconds + "ms; uri=" + uri;
+                return items;
+            }
+
+            // result is either CompletionItem[] or a CompletionList { items: [...] }.
+            object result = response["result"];
+            var rawItems = result as System.Collections.ArrayList;
+            if (rawItems == null)
+            {
+                var asList = result as Dictionary<string, object>;
+                if (asList != null && asList.ContainsKey("items"))
+                    rawItems = asList["items"] as System.Collections.ArrayList;
+            }
+            if (rawItems == null)
+            {
+                LastCompletionDiagnostic = "result not list (type=" + result.GetType().FullName + ") in " + sw.ElapsedMilliseconds + "ms";
+                return items;
+            }
+            LastCompletionDiagnostic = "raw=" + rawItems.Count + " in " + sw.ElapsedMilliseconds + "ms; uri=" + uri;
+
+            foreach (var obj in rawItems)
+            {
+                // Hard item cap — bound the work done on the (UI) calling thread even if
+                // the server returns an enormous list.
+                if (items.Count >= MaxCompletionItems) break;
+
+                var d = obj as Dictionary<string, object>;
+                if (d == null) continue;
+
+                var ci = new CompletionItemInfo();
+                if (d.ContainsKey("label")) ci.Label = Cap(d["label"] as string, MaxLabelLen);
+                if (d.ContainsKey("kind")) { try { ci.Kind = Convert.ToInt32(d["kind"]); } catch { } }
+                if (d.ContainsKey("detail")) ci.Detail = Cap(d["detail"] as string, MaxTextLen);
+                if (d.ContainsKey("insertText")) ci.InsertText = Cap(d["insertText"] as string, MaxTextLen);
+                if (d.ContainsKey("documentation"))
+                {
+                    var docVal = d["documentation"];
+                    var docStr = docVal as string;
+                    if (docStr != null) ci.Documentation = Cap(docStr, MaxTextLen);
+                    else
+                    {
+                        var md = docVal as Dictionary<string, object>;
+                        if (md != null && md.ContainsKey("value")) ci.Documentation = Cap(md["value"] as string, MaxTextLen);
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(ci.Label)) items.Add(ci);
+            }
+            return items;
         }
 
         private void TrackRequest(string tool, string target)
@@ -571,6 +709,72 @@ namespace ClarionAssistant.Services
         }
 
         /// <summary>
+        /// Opens (or, if already open, full-replaces) the document on the server using
+        /// caller-supplied text rather than disk contents. Used for the embeditor, whose
+        /// live generated buffer is not on disk — keeps the server's copy in sync with the
+        /// editor so scope-aware completion sees the current locals.
+        /// </summary>
+        // Hash of the last text we synced per file, so repeated completion/hover calls on an
+        // unchanged buffer skip the didChange (and the server-side re-tokenization it triggers).
+        private readonly Dictionary<string, int> _lastSyncedHash =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        private void EnsureDocumentOpenWithText(string filePath, string text)
+        {
+            string uri = FilePathToUri(filePath);
+            int hash = (text != null ? text.Length : 0) ^ (text != null ? text.GetHashCode() : 0);
+            int currentVersion;
+            if (_openDocuments.TryGetValue(filePath, out currentVersion))
+            {
+                // Unchanged since last sync → nothing to send (avoids needless re-tokenize).
+                int lastHash;
+                if (_lastSyncedHash.TryGetValue(filePath, out lastHash) && lastHash == hash)
+                    return;
+
+                int nextVersion = currentVersion + 1;
+                var changes = new System.Collections.ArrayList
+                {
+                    new Dictionary<string, object> { { "text", text } }
+                };
+                var changeParms = new Dictionary<string, object>
+                {
+                    { "textDocument", new Dictionary<string, object> { { "uri", uri }, { "version", nextVersion } } },
+                    { "contentChanges", changes }
+                };
+                SendNotification("textDocument/didChange", changeParms);
+                _openDocuments[filePath] = nextVersion;
+                _lastSyncedHash[filePath] = hash;
+                return;
+            }
+
+            var openParms = new Dictionary<string, object>
+            {
+                { "textDocument", new Dictionary<string, object>
+                    {
+                        { "uri", uri },
+                        { "languageId", "clarion" },
+                        { "version", 1 },
+                        { "text", text }
+                    }
+                }
+            };
+            SendNotification("textDocument/didOpen", openParms);
+            _openDocuments[filePath] = 1;
+            _lastSyncedHash[filePath] = hash;
+        }
+
+        /// <summary>
+        /// Public: sync an in-memory buffer (e.g. the live embeditor) to the server. Triggers
+        /// re-validation and a textDocument/publishDiagnostics for the URI. No-op if the text
+        /// is unchanged since the last sync, so it's cheap to call on a UI timer.
+        /// </summary>
+        public void EnsureBufferSynced(string filePath, string bufferText)
+        {
+            if (!IsRunning || string.IsNullOrEmpty(filePath) || bufferText == null) return;
+            try { EnsureDocumentOpenWithText(filePath, bufferText); } catch { }
+        }
+
+        /// <summary>
         /// Send a full-document textDocument/didChange with the current file contents
         /// from disk. Used to force the server to re-analyze a file that's already open
         /// after it may have changed (e.g., after write_embed_content or an external edit).
@@ -652,15 +856,22 @@ namespace ClarionAssistant.Services
             DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
             while (DateTime.UtcNow < deadline)
             {
+                string response = null;
                 lock (_responses)
                 {
-                    string response;
                     if (_responses.TryGetValue(id, out response))
-                    {
                         _responses.Remove(id);
-                        return _serializer.Deserialize<Dictionary<string, object>>(response);
-                    }
+                    else
+                        response = null;
                 }
+
+                // Deserialize OUTSIDE the lock. A large response (e.g. a completion
+                // list with thousands of items) can take real time to parse; doing it
+                // under _responses would block the reader thread from draining stdout
+                // and back-pressure the server's pipe.
+                if (response != null)
+                    return _serializer.Deserialize<Dictionary<string, object>>(response);
+
                 _responseReceived.WaitOne(100);
             }
 
@@ -814,6 +1025,12 @@ namespace ClarionAssistant.Services
                         if (start.ContainsKey("line")) entry.Line = Convert.ToInt32(start["line"]);
                         if (start.ContainsKey("character")) entry.Character = Convert.ToInt32(start["character"]);
                     }
+                    var end = range != null && range.ContainsKey("end") ? range["end"] as Dictionary<string, object> : null;
+                    if (end != null)
+                    {
+                        if (end.ContainsKey("line")) entry.EndLine = Convert.ToInt32(end["line"]);
+                        if (end.ContainsKey("character")) entry.EndCharacter = Convert.ToInt32(end["character"]);
+                    }
 
                     entries.Add(entry);
                 }
@@ -957,8 +1174,25 @@ namespace ClarionAssistant.Services
             public int Severity;
             public int Line;
             public int Character;
+            public int EndLine;
+            public int EndCharacter;
             public string Message;
             public string Source;
+        }
+
+        /// <summary>
+        /// A single completion item parsed from a textDocument/completion response.
+        /// Kind follows the LSP CompletionItemKind enum (1=Text, 2=Method, 3=Function,
+        /// 6=Variable, 7=Class, 10=Property, 14=Keyword, 21=Constant, 25=TypeParameter, …);
+        /// 0 = unspecified.
+        /// </summary>
+        public class CompletionItemInfo
+        {
+            public string Label;
+            public int Kind;
+            public string Detail;
+            public string Documentation;
+            public string InsertText;
         }
 
         /// <summary>

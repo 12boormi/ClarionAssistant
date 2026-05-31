@@ -26,4 +26,11 @@
     <MenuItem id="ShowAgentPanel" label="Agent Panel"
               class="ClarionAssistant.ShowAgentPanelCommand"/>
   </Path>
+
+  <!-- Modern Embeditor (Path A) POC: completion-test button on the embeditor toolbar. -->
+  <Path name="/SoftVelocity/Clarion/ToolBar/EmbedEditor">
+    <ToolbarItem id="EmbeditorCompletionTest" label="Completion Test"
+                 tooltip="Modern Embeditor POC: pop an ICSharpCode completion window with our own items"
+                 class="ClarionAssistant.EmbeditorCompletionTestCommand"/>
+  </Path>
 </AddIn>

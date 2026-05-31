@@ -36,3 +36,9 @@ ClarionAssistant/Properties/AssemblyVersion.cs
 
 # Local Clarion deploy target written by the sibling project's build
 /Clarion/
+
+# Local runtime knowledge-base SQLite (per-dev data, not repo content)
+ClarionAssistant/knowledge.db
+
+# Transient MultiTerminal task worktrees
+.claude/worktrees/

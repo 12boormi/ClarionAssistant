@@ -3680,15 +3680,17 @@ Rebuilds both the bundled and the personal DocGraph DBs when both exist.",
         /// <summary>
         /// Resolves the LSP server.js path. Priority:
         /// 1. Settings key "Lsp.ServerPath" (manual override — always wins)
-        /// 2. Clarion VS Code extension install, across Stable/Insiders/custom roots,
-        ///    excluding tombstoned extensions listed in .obsolete and picking the
-        ///    highest stable SemVer
-        /// 3. Relative to assembly: {assemblyDir}\lsp-server\out\server\src\server.js
+        /// 2. Bundled server relative to assembly: {assemblyDir}\lsp-server\out\server\src\server.js.
+        ///    PREFERRED: it ships with the addin (deploy.ps1) and is version-locked to the
+        ///    addin's features (e.g. textDocument/completion), so it must win over an
+        ///    externally-installed VS Code extension that can lag behind and 404 newer methods.
+        /// 3. Clarion VS Code extension install (Stable/Insiders/custom roots, excluding
+        ///    tombstoned extensions, highest stable SemVer) — fallback when no bundled server.
         /// 4. Returns null ("LSP not available")
         ///
         /// The source parameter is populated with a short label describing which
-        /// branch resolved the path ("manual", "vscode-stable", "vscode-insiders",
-        /// "vscode-custom", "bundled") or an error message for lsp_start to surface.
+        /// branch resolved the path ("manual", "bundled", "vscode-stable",
+        /// "vscode-insiders", "vscode-custom") or an error message for lsp_start to surface.
         /// </summary>
         private string ResolveLspServerPath(out string source)
         {
@@ -3705,13 +3707,10 @@ Rebuilds both the bundled and the personal DocGraph DBs when both exist.",
                 }
             }
 
-            // 2. VS Code extension scan
-            string vsCodeError = null;
-            string vsCodePath = DiscoverVsCodeLspServer(out source, out vsCodeError);
-            if (vsCodePath != null)
-                return vsCodePath;
-
-            // 3. Assembly-relative fallback
+            // 2. Bundled server next to the addin — PREFERRED. Ships with the addin via
+            //    deploy.ps1 and is version-locked to its features (completion, etc.), so it
+            //    must win over an externally-installed VS Code extension that may be older
+            //    and reject newer methods (e.g. textDocument/completion → JSON-RPC -32601).
             string assemblyDir = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
             string lspPath = Path.Combine(assemblyDir, "lsp-server", "out", "server", "src", "server.js");
             if (File.Exists(lspPath))
@@ -3719,6 +3718,13 @@ Rebuilds both the bundled and the personal DocGraph DBs when both exist.",
                 source = "bundled (lsp-server next to addin)";
                 return lspPath;
             }
+
+            // 3. VS Code extension scan — fallback only when no bundled server is present
+            //    (e.g. a dev build run without a deployed lsp-server folder).
+            string vsCodeError = null;
+            string vsCodePath = DiscoverVsCodeLspServer(out source, out vsCodeError);
+            if (vsCodePath != null)
+                return vsCodePath;
 
             // 4. Nothing found. Prefer the VS Code error if the scan had one
             //    (more actionable than "no bundled LSP"), otherwise leave source null.
@@ -3916,6 +3922,32 @@ Rebuilds both the bundled and the personal DocGraph DBs when both exist.",
             }
             catch { }
             return null;
+        }
+
+        /// <summary>
+        /// Starts the LSP in the background if not already running. Safe to call from the
+        /// UI thread — the start (process spawn + initialize, which can block several
+        /// seconds) runs on a thread-pool thread. Used to eager-start the server on
+        /// solution-select so embeditor completion is fully populated without the user
+        /// first invoking an LSP feature. No-op if already running.
+        /// </summary>
+        private int _lspStarting; // 0 = idle, 1 = a background start is in flight
+        public void EnsureLspRunningInBackground()
+        {
+            if (_lspClient != null && _lspClient.IsRunning) return;
+            // Only one background start at a time — the self-heal path can call this on
+            // every completion attempt, and EnsureLspRunning isn't safe to run concurrently.
+            if (System.Threading.Interlocked.CompareExchange(ref _lspStarting, 1, 0) != 0) return;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                try { EnsureLspRunning(); }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        "[McpToolRegistry] background EnsureLspRunning failed: " + ex.Message);
+                }
+                finally { System.Threading.Interlocked.Exchange(ref _lspStarting, 0); }
+            });
         }
 
         private void EnsureLspRunning()

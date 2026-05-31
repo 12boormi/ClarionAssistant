@@ -738,6 +738,11 @@ namespace ClarionAssistant
                     RunIndex(false);
                 else
                     RunIndex(true);
+
+                // Eager-start the LSP on startup-restore so embeditor completion is
+                // populated on first use (the restore sets _currentSlnPath directly, so
+                // no solution-"change" is detected and DetectFromIde never runs here).
+                _toolRegistry?.EnsureLspRunningInBackground();
             }
         }
 
@@ -772,6 +777,13 @@ namespace ClarionAssistant
                     System.Diagnostics.Debug.WriteLine("[AssistantChatControl] Solution changed: " + slnPath);
                     DetectFromIde();
                 }
+
+                // Backstop: keep the LSP up whenever a solution is known. Idempotent and
+                // guarded (no-op if already running), this covers the startup-restore case
+                // where no solution "change" is ever detected, so the LSP comes up within
+                // one poll interval without the user invoking completion first.
+                if (!string.IsNullOrEmpty(_currentSlnPath))
+                    _toolRegistry?.EnsureLspRunningInBackground();
             }
             catch { }
         }
@@ -791,6 +803,12 @@ namespace ClarionAssistant
             LoadVersions();
             LoadRedFile();
             UpdateInstanceState();
+
+            // Eager-start the LSP (background) when the IDE's open solution is detected,
+            // so embeditor completion is fully populated without a manual LSP trigger.
+            // (This is the IDE-poll path; OnSolutionChanged covers the assistant-UI path.)
+            if (!string.IsNullOrEmpty(_currentSlnPath))
+                _toolRegistry?.EnsureLspRunningInBackground();
         }
 
         private void OnSolutionChanged(string path)
@@ -802,6 +820,12 @@ namespace ClarionAssistant
                 UpdateIndexStatus();
                 LoadRedFile();
                 UpdateInstanceState();
+
+                // Eager-start the LSP (background) so embeditor completion is fully
+                // populated without the user first invoking an LSP feature. RedFile is
+                // loaded above so cross-file paths are available; the start itself can
+                // block several seconds, hence off the UI thread.
+                _toolRegistry?.EnsureLspRunningInBackground();
 
                 // Ensure active tab has schema sources panel
                 var activeTab = _tabManager.ActiveTab;
@@ -2381,8 +2405,24 @@ namespace ClarionAssistant
 
             // Poll LSP diagnostics for the header pill (2s interval, cache-only reads)
             _lspUiTimer = new System.Windows.Forms.Timer { Interval = 2000 };
-            _lspUiTimer.Tick += (s, ev) => PollLspUi();
+            _lspUiTimer.Tick += (s, ev) =>
+            {
+                PollLspUi();
+                // Arm LSP hover tooltips on the active embeditor (idempotent; no single
+                // embeditor-open event, so we attach opportunistically on the timer).
+                Services.EmbeditorCompletionService.EnsureHoverHandlerAttached();
+                // Sync the embeditor buffer + render LSP diagnostics as squiggles.
+                Services.EmbeditorCompletionService.EnsureDiagnosticsRendered();
+            };
             _lspUiTimer.Start();
+
+            // Install the app-wide Ctrl+Space embeditor-completion trigger (UI thread).
+            try { Services.EmbeditorCompletionService.InstallCtrlSpaceTrigger(); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[AssistantChatControl] Ctrl+Space trigger install failed: " + ex.Message); }
+
+            // Self-heal hook: if embeditor completion finds no active LSP, it kicks off a
+            // background start so the next invocation is fully populated.
+            Services.EmbeditorCompletionService.LspStarter = () => _toolRegistry?.EnsureLspRunningInBackground();
         }
 
         #endregion

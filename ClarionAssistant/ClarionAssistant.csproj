@@ -54,6 +54,10 @@
       <HintPath>$(ClarionRoot)\bin\ICSharpCode.SharpDevelop.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="ICSharpCode.TextEditor">
+      <HintPath>$(ClarionRoot)\bin\ICSharpCode.TextEditor.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <!-- Old-style csproj + PackageReference is inconsistent under dotnet/msbuild for this project.
          Add explicit WebView2 references so compile-time assemblies are always resolved after restore. -->
     <Reference Include="Microsoft.Web.WebView2.Core">
@@ -93,6 +97,8 @@
     <Compile Include="Services\LibraryIndexer.cs" />
     <Compile Include="Services\AppTreeService.cs" />
     <Compile Include="Services\IdeReflectionService.cs" />
+    <Compile Include="Services\EmbeditorCompletionService.cs" />
+    <Compile Include="EmbeditorCompletionTestCommand.cs" />
     <Compile Include="Dialogs\ClaudeChatSettingsDialog.cs" />
     <Compile Include="Dialogs\CheatSheetDialog.cs" />
     <Compile Include="Terminal\NativeMethods.cs" />
