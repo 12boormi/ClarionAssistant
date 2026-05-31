@@ -672,10 +672,42 @@ Spike **B1 + Monaco**, first proving **M1 (read-only render)**. Sidesteps the on
 (button hijack), reuses the save-back engine + WebView2 + LSP investments, de-risks the idea cheaply.
 Decision gate after M1: continue to M2/M3 or stop.
 
+### Investigation (2026-05-31): generate embed source WITHOUT Clarion's embeditor? + multi-editor
+
+**Q:** managed `LoadProcedure(name) → text` to feed our editor directly (and open multiple procedures at
+once, which Clarion forbids)? **A: no managed path; but multiple MODERN editors ARE achievable.**
+
+Static Cecil scan of `clarion.gen.dll`, `Generator.dll`, `CWBinding.dll`, `SoftVelocity.Ide.Core.dll`
+(metadata + IL, nothing executed):
+- **All detail-object ctors take native pointers:** `CPweeDetails.ctor(__Clarion.IPWEERequester*)`,
+  `CEmbedEditorDetails.ctor(__Clarion.IEmbedEditorRequester*)`, `CPweeText.ctor(__Clarion.IPWEEText*)`,
+  `CPweeEmbedPoint.ctor(__Clarion.IPWEEEmbedPoint*)`. Not constructible from managed code.
+- **No producers:** nothing managed returns `IPweeDetails`/`IEmbedEditorDetails`.
+- **Only construction site (IL):** `<Module>::Clarion.GEN.GeneratorUI.OpenPWEE` (C++/CLI module glue the
+  NATIVE generator calls) does `newobj CPweeDetails(requester*)` → `IGeneratorBinding.OpenPwee`. The managed
+  `OpenPwee(IPweeDetails)` / `OpenEmbedEditor(name, IEmbedEditorDetails)` exist but *consume* a details object
+  we can't make.
+- **Conclusion:** generation is native; the details object is born from a native `IPWEERequester*` only the
+  native generator produces. `OpenProcedureEmbed`'s Win32 automation is the ONLY trigger. "One embeditor at a
+  time" = native single PWEE-requester context, not liftable from managed code. (Hardens the
+  `clarion-ide-internals` dead-end at the IL level.)
+
+**Multi-editor via mirror+snapshot (the deliverable answer to "open multiple procedures"):**
+1. `OpenProcedureEmbed(name)` → native generates → mirror ClaGenEditor buffer (source + editable ranges) into
+   a Monaco tab → **close Clarion's embeditor** (releases the native single-embeditor lock).
+2. Repeat per procedure → N Monaco tabs open at once (snapshots).
+3. **Save (M2):** transiently re-open that procedure's embeditor, write changed slots via
+   `WriteEmbedContentByLine`, `SaveAndCloseEmbeditor`. Saves serialize; viewing/editing is concurrent.
+   Caveats: snapshots can go stale if the `.app` is regenerated underneath (reload/detect); save is 1-at-a-time.
+
 ### ▶ M1 spike checklist (on ticket fe8a4660)
 1. Scaffold `Terminal/ModernEmbeditorViewContent.cs` (Monaco/WebView2) cloned from `DiffViewContent` +
-   `Terminal/monaco-embeditor.html` with bundled Monaco assets and a "ready" handshake.
-2. `ShowModernEmbeditorCommand : AbstractMenuCommand` + menu/toolbar entry → `ShowView` the new view.
+   `Terminal/monaco-embeditor.html`. ⚠️ CORRECTION (during build): Monaco is **CDN-loaded** (jsdelivr
+   `monaco-editor@0.52.2`, matching `header.html`'s prefetch + xterm's CDN pattern), **not bundled** —
+   followed the product convention. Includes a "ready" JS→C# handshake. **DONE (v4.6.59).**
+2. `ShowModernEmbeditorCommand : AbstractMenuCommand` + "Modern Embeditor" ToolbarItem on the embeditor
+   toolbar → `ShowView` the view; source via new `EmbeditorCompletionService.TryGetActiveEmbeditorText`.
+   **DONE (v4.6.60) — items 1+2 in TESTING, awaiting C12 manual verify.**
 3. Source extraction: adapt `GetEmbeditorSource` to emit plain assembled text + the editable-region map
    (start/end line per `«E:N»`); pass both into the view over the bridge.
 4. Monaco render + read-only guard: load source, lock generated ranges, leave embed slots editable; basic
