@@ -86,18 +86,27 @@ namespace ClarionAssistant
             catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernDataPad] Message error: " + ex.Message); }
         }
 
-        /// <summary>Pull the active Modern Embeditor tab's data symbols (off the UI thread) and send to the pad.</summary>
+        /// <summary>Pull the active Modern Embeditor tab's data (locals + used tables) off the UI thread.</summary>
         public void Refresh()
         {
             var view = Terminal.ModernEmbeditorViewContent.ActiveModernView();
-            if (view == null) { Post(new Dictionary<string, object> { { "title", "(no Modern Embeditor active)" }, { "items", new List<object>() } }); return; }
-            string title = "Data";
+            if (view == null)
+            {
+                Post(new Dictionary<string, object>
+                {
+                    { "title", "(no Modern Embeditor active)" },
+                    { "locals", new List<object>() }, { "tables", new List<object>() }
+                });
+                return;
+            }
             Task.Run(() =>
             {
-                List<Dictionary<string, object>> items;
-                try { items = view.GetDataSymbols(); }
-                catch { items = new List<Dictionary<string, object>>(); }
-                Post(new Dictionary<string, object> { { "title", title }, { "items", items } });
+                Dictionary<string, object> data;
+                try { data = view.GetPadData(); }
+                catch { data = new Dictionary<string, object> { { "locals", new List<object>() }, { "tables", new List<object>() } }; }
+                object proc; data.TryGetValue("procedure", out proc);
+                data["title"] = string.IsNullOrEmpty(proc as string) ? "Data" : (string)proc;
+                Post(data);
             });
         }
 

@@ -127,6 +127,68 @@ namespace ClarionAssistant.Terminal
             }
         }
 
+        /// <summary>
+        /// Combined data payload for the Modern Data pad: the procedure's local symbols (LSP) plus the
+        /// dictionary tables it references (parsed from the generated &lt;app&gt;.clw, filtered to used ones).
+        /// </summary>
+        public Dictionary<string, object> GetPadData()
+        {
+            var locals = new List<Dictionary<string, object>>();
+            try
+            {
+                foreach (var d in ClarionAppDataReader.ParseLocalData(_sourceText, _procedureName))
+                    locals.Add(new Dictionary<string, object> { { "name", d.Name }, { "type", d.Type } });
+            }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernEmbeditor] ParseLocalData: " + ex.Message); }
+
+            var data = new Dictionary<string, object>
+            {
+                { "procedure", _procedureName ?? "" },
+                { "locals", locals },
+                { "tables", GetUsedTables() }
+            };
+            return data;
+        }
+
+        private List<Dictionary<string, object>> GetUsedTables()
+        {
+            var outp = new List<Dictionary<string, object>>();
+            try
+            {
+                string appClw = ClarionAppDataReader.FindAppClwPath();
+                if (appClw == null) return outp;
+                var tables = ClarionAppDataReader.ParseTables(appClw);
+                string src = _sourceText ?? "";
+                foreach (var t in tables)
+                {
+                    if (!IsTableUsed(t, src)) continue;
+                    var cols = new List<Dictionary<string, object>>();
+                    foreach (var f in t.Fields)
+                        cols.Add(new Dictionary<string, object> { { "name", f.Name }, { "type", f.Type } });
+                    outp.Add(new Dictionary<string, object>
+                    {
+                        { "name", t.Name }, { "prefix", t.Prefix }, { "columns", cols }, { "keys", t.Keys }
+                    });
+                }
+            }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernEmbeditor] GetUsedTables: " + ex.Message); }
+            return outp;
+        }
+
+        // A table is "used" by the procedure if its PRE: prefix or its name appears in the mirrored source.
+        private static bool IsTableUsed(ClarionAppDataReader.TableDef t, string src)
+        {
+            if (string.IsNullOrEmpty(src)) return false;
+            if (!string.IsNullOrEmpty(t.Prefix) && src.IndexOf(t.Prefix + ":", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+            if (!string.IsNullOrEmpty(t.Name) &&
+                System.Text.RegularExpressions.Regex.IsMatch(src,
+                    @"\b" + System.Text.RegularExpressions.Regex.Escape(t.Name) + @"\b",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                return true;
+            return false;
+        }
+
         /// <summary>Insert text at the editor's cursor (used by the Modern Data pad's double-click-insert).</summary>
         public void InsertAtCursor(string text)
         {

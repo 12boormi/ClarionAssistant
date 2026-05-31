@@ -40,6 +40,9 @@ namespace ClarionAssistant.Services
         private readonly Dictionary<string, string> _macros;
         private string _redFilePath;
 
+        /// <summary>The most-recently-loaded instance, so static helpers can resolve generated files.</summary>
+        public static RedFileService Active { get; private set; }
+
         public string RedFilePath => _redFilePath;
         public IReadOnlyDictionary<string, RedSection> Sections => _sections;
         public IReadOnlyDictionary<string, string> Macros => _macros;
@@ -81,6 +84,7 @@ namespace ClarionAssistant.Services
             try
             {
                 Parse(File.ReadAllLines(redFilePath));
+                Active = this;
                 return true;
             }
             catch
