@@ -362,6 +362,10 @@ namespace ClarionAssistant.Terminal
                     HandleCompletion(json);
                 else if (action == "hover")
                     HandleHover(json);
+                else if (action == "diagnostics")
+                    HandleDiagnostics(json);
+                else if (action == "saveSettings")
+                    HandleSaveSettings(json);
             }
             catch (Exception ex)
             {
@@ -418,6 +422,24 @@ namespace ClarionAssistant.Terminal
         /// datatypes, attributes, controls) — no per-keystroke buffer sync needed. Runs off the UI thread
         /// and posts the result back keyed by reqId.
         /// </summary>
+        /// <summary>
+        /// Kick the shared LSP self-heal (idempotent, fire-and-forget) when no client is running yet.
+        /// Mirrors the native embeditor's completion-time self-heal (EmbeditorCompletionService.LspStarter,
+        /// wired to EnsureLspRunningInBackground) so the Modern editor can also recover the language server —
+        /// completion, hover, AND the LSP diagnostics pass all depend on it. The first request after a cold
+        /// start still returns empty (server warming); the next one succeeds.
+        /// </summary>
+        private static void EnsureLspStarted()
+        {
+            try
+            {
+                var lsp = LspClient.Active;
+                if (lsp == null || !lsp.IsRunning)
+                    EmbeditorCompletionService.LspStarter?.Invoke();
+            }
+            catch { }
+        }
+
         private void HandleCompletion(string json)
         {
             int reqId, line, column;
@@ -425,10 +447,14 @@ namespace ClarionAssistant.Terminal
             Task.Run(() =>
             {
                 var items = new List<Dictionary<string, object>>();
+                string lspStatus;
                 try
                 {
+                    EnsureLspStarted();
                     var lsp = LspClient.Active;
-                    if (lsp != null)
+                    if (lsp == null) lspStatus = "not started";
+                    else if (!lsp.IsRunning) lspStatus = "starting";
+                    else
                     {
                         // Context-free: pass no buffer; the server returns the language item set.
                         var comps = lsp.GetCompletion(_lspFileName, Math.Max(0, line - 1), Math.Max(0, column - 1), 2500, null);
@@ -442,10 +468,15 @@ namespace ClarionAssistant.Terminal
                                     { "documentation", c.Documentation },
                                     { "insertText", c.InsertText }
                                 });
+                        lspStatus = string.IsNullOrEmpty(lsp.LastCompletionDiagnostic) ? "ok" : lsp.LastCompletionDiagnostic;
                     }
                 }
-                catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernEmbeditor] completion: " + ex.Message); }
-                PostResponse(reqId, new Dictionary<string, object> { { "items", items } });
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine("[ModernEmbeditor] completion: " + ex.Message);
+                    lspStatus = "error: " + ex.Message;
+                }
+                PostResponse(reqId, new Dictionary<string, object> { { "items", items }, { "lsp", lspStatus } });
             });
         }
 
@@ -459,8 +490,9 @@ namespace ClarionAssistant.Terminal
                 string contents = null;
                 try
                 {
+                    EnsureLspStarted();
                     var lsp = LspClient.Active;
-                    if (lsp != null)
+                    if (lsp != null && lsp.IsRunning)
                     {
                         var resp = lsp.GetHover(_lspFileName, Math.Max(0, line - 1), Math.Max(0, column - 1), buffer);
                         contents = ExtractHoverString(resp);
@@ -469,6 +501,106 @@ namespace ClarionAssistant.Terminal
                 catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernEmbeditor] hover: " + ex.Message); }
                 PostResponse(reqId, new Dictionary<string, object> { { "contents", contents } });
             });
+        }
+
+        /// <summary>
+        /// Diagnostics request from Monaco (debounced after edits + once after load). Runs the hybrid
+        /// ModernEmbeditorDiagnostics over the LIVE buffer + LIVE editable ranges — Monaco passes its
+        /// decoration-tracked ranges because slots grow as the user types, so the load-time
+        /// _editableRanges snapshot would be stale. Runs off the UI thread (the LSP sub-pass blocks),
+        /// then posts back a unified marker list for setModelMarkers.
+        /// </summary>
+        private void HandleDiagnostics(string json)
+        {
+            int reqId; string buffer; List<int[]> ranges;
+            if (!ParseDiagnosticsRequest(json, out reqId, out buffer, out ranges)) return;
+            Task.Run(() =>
+            {
+                var markers = new List<Dictionary<string, object>>();
+                try
+                {
+                    markers = ModernEmbeditorDiagnostics.Compute(
+                        _lspFileName,
+                        buffer ?? _sourceText,
+                        (ranges != null && ranges.Count > 0) ? ranges : _editableRanges,
+                        _procedureName);
+                }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernEmbeditor] diagnostics: " + ex.Message); }
+                PostResponse(reqId, new Dictionary<string, object> { { "markers", markers } });
+            });
+        }
+
+        // Parses a diagnostics request: reqId, the live buffer text, and the live editable ranges
+        // (an array of [start,end] line pairs from Monaco's tracked decorations).
+        private bool ParseDiagnosticsRequest(string json, out int reqId, out string buffer, out List<int[]> ranges)
+        {
+            reqId = 0; buffer = null; ranges = null;
+            try
+            {
+                var data = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(json) as Dictionary<string, object>;
+                if (data == null) return false;
+                if (data.ContainsKey("reqId")) reqId = Convert.ToInt32(data["reqId"]);
+                if (data.ContainsKey("buffer")) buffer = data["buffer"] as string;
+                if (data.ContainsKey("ranges"))
+                {
+                    var arr = data["ranges"] as object[];
+                    if (arr != null)
+                    {
+                        ranges = new List<int[]>();
+                        foreach (var item in arr)
+                        {
+                            var pair = item as object[];
+                            if (pair != null && pair.Length >= 2)
+                                ranges.Add(new[] { Convert.ToInt32(pair[0]), Convert.ToInt32(pair[1]) });
+                        }
+                    }
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// Persist the dev's editor settings (from the gear panel) and broadcast them to every open
+        /// Modern Embeditor tab so the change is consistent across tabs. Persist failures are logged but
+        /// don't block the broadcast — the live editors still reflect the new options for this session.
+        /// </summary>
+        private void HandleSaveSettings(string json)
+        {
+            try
+            {
+                var data = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(json) as Dictionary<string, object>;
+                var sd = (data != null && data.ContainsKey("settings")) ? data["settings"] as Dictionary<string, object> : null;
+                if (sd == null) return;
+                var settings = ModernEmbeditorSettings.FromDict(sd);
+                try { settings.Save(); }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernEmbeditor] saveSettings persist: " + ex.Message); }
+                ApplySettingsToAll(settings); // broadcast to every open tab (incl. this one — idempotent)
+            }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernEmbeditor] saveSettings: " + ex.Message); }
+        }
+
+        /// <summary>Push the given settings to this tab's Monaco (gear panel + live updateOptions).</summary>
+        public void ApplySettings(ModernEmbeditorSettings settings)
+        {
+            if (settings == null) return;
+            string sjson;
+            try { sjson = new JavaScriptSerializer().Serialize(settings.ToDict()); }
+            catch { return; }
+            Action post = () =>
+            {
+                if (_webView == null || _webView.CoreWebView2 == null) return;
+                try { _webView.CoreWebView2.PostWebMessageAsJson("{\"type\":\"applySettings\",\"settings\":" + sjson + "}"); }
+                catch { }
+            };
+            try { if (_panel != null && _panel.InvokeRequired) _panel.BeginInvoke(post); else post(); }
+            catch { }
+        }
+
+        /// <summary>Broadcast editor settings to all open Modern Embeditor tabs (mirrors ApplyThemeToAll).</summary>
+        public static void ApplySettingsToAll(ModernEmbeditorSettings settings)
+        {
+            lock (_instances) { foreach (var inst in _instances) inst.ApplySettings(settings); }
         }
 
         private bool ParseRequest(string json, out int reqId, out int line, out int column, out string buffer)
@@ -596,11 +728,19 @@ namespace ClarionAssistant.Terminal
         {
             if (_webView.CoreWebView2 == null) return;
 
+            // Warm the language server as soon as the editor opens, so completion/hover/LSP-diagnostics
+            // are ready by the time the dev uses them (self-heal if eager-start never fired).
+            EnsureLspStarted();
+
             try
             {
                 // Transfer source via the virtual host (temp file) to avoid huge postMessage payloads.
                 string sourceFile = Path.Combine(_tempDir, "source.txt");
                 File.WriteAllText(sourceFile, _sourceText ?? "", Encoding.UTF8);
+
+                string settingsJson;
+                try { settingsJson = new JavaScriptSerializer().Serialize(ModernEmbeditorSettings.Load().ToDict()); }
+                catch { settingsJson = "null"; }
 
                 string json = "{\"type\":\"setSource\"," +
                     "\"title\":" + JsonString(_title) + "," +
@@ -608,6 +748,7 @@ namespace ClarionAssistant.Terminal
                     "\"isDark\":" + (_isDark ? "true" : "false") + "," +
                     "\"saveEnabled\":" + (_saveEnabled ? "true" : "false") + "," +
                     "\"editableRanges\":" + RangesJson() + "," +
+                    "\"settings\":" + settingsJson + "," +
                     "\"sourceUrl\":\"https://" + VIRTUAL_HOST + "/source.txt\"}";
                 _webView.CoreWebView2.PostWebMessageAsJson(json);
             }

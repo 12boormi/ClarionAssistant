@@ -49,6 +49,19 @@
     #toast.show { opacity: 1; transform: translateY(0); }
     #toast.err { background: #f38ba8; color: #1e1e2e; }
 
+    #toolbar #settingsBtn { padding: 3px 8px; font-size: 14px; line-height: 1; }
+
+    #settingsPanel {
+        position: absolute; top: 40px; right: 10px; z-index: 30;
+        background: var(--toolbar-bg); border: 1px solid var(--toolbar-border);
+        border-radius: 6px; padding: 10px 12px; min-width: 230px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.4); font-size: 12px; color: var(--fg);
+    }
+    #settingsPanel.hidden { display: none; }
+    #settingsPanel h4 { font-size: 12px; margin-bottom: 8px; color: var(--title-accent); }
+    #settingsPanel label { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 7px 0; }
+    #settingsPanel input[type=number] { width: 58px; }
+
     #editor { position: absolute; top: 38px; left: 0; right: 0; bottom: 0; }
 
     #loading {
@@ -70,7 +83,17 @@
     <div id="toolbar">
         <div class="title">Modern Embeditor — <span id="titleText">(no procedure)</span></div>
         <div class="spacer"></div>
+        <button id="settingsBtn" title="Editor settings">&#9881;</button>
         <button id="saveBtn" title="Save changes (Ctrl+S)">Save</button>
+    </div>
+    <div id="settingsPanel" class="hidden">
+        <h4>Editor settings</h4>
+        <label>Tab size <input type="number" id="setTabSize" min="1" max="16" step="1"></label>
+        <label>Insert spaces (not tabs) <input type="checkbox" id="setInsertSpaces"></label>
+        <label>Smart auto-indent <input type="checkbox" id="setAutoIndent"></label>
+        <label>Word wrap <input type="checkbox" id="setWordWrap"></label>
+        <label>Minimap <input type="checkbox" id="setMinimap"></label>
+        <label>Font size <input type="number" id="setFontSize" min="6" max="48" step="1"></label>
     </div>
     <div id="editor"></div>
     <div id="loading">Loading editor…</div>
@@ -93,6 +116,7 @@
     var saveSafetyTimer = null;   // ensures the "Saving…" toast can never hang forever
     var pendingRequests = {};     // reqId -> resolver, for async LSP completion/hover round-trips
     var reqSeq = 0;
+    var lastSettings = null;      // latest editor settings applied (for the gear panel + re-apply)
 
     function postToHost(obj) {
         try { window.chrome.webview.postMessage(JSON.stringify(obj)); } catch (e) { /* not in webview */ }
@@ -150,6 +174,7 @@
                 editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, doSave);
                 editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyX, doClarionCut);
                 document.getElementById('saveBtn').addEventListener('click', doSave);
+                wireSettingsPanel();
                 ready = true;
                 document.getElementById('loading').classList.add('hidden');
                 if (pending) { applySource(pending); pending = null; }
@@ -171,6 +196,7 @@
         document.getElementById('titleText').textContent =
             (msg.title || '(no procedure)') + '  ·  ' + embedRanges.length + ' editable slot(s)';
         if (typeof msg.isDark === 'boolean') setTheme(msg.isDark);
+        if (msg.settings) { applyEditorSettings(msg.settings); populateSettingsPanel(msg.settings); }
         // Source is transferred via the virtual-host URL to avoid huge postMessage payloads.
         fetch(msg.sourceUrl, { cache: 'no-store' })
             .then(function (r) { return r.text(); })
@@ -181,6 +207,7 @@
                 applyEmbedDecorations();
                 guarding = false;
                 editor.revealLine(1);
+                scheduleDiagnostics();      // initial squiggle pass once the buffer is in
             })
             .catch(function (err) {
                 editor.setValue('// Failed to load embeditor source: ' + err);
@@ -274,10 +301,10 @@
     // in the same order as the C# editable ranges, and hand them to the host to persist.
     function gatherSlots() {
         var model = editor.getModel();
-        return embedDecorations.map(function (id) {
-            var r = model.getDecorationRange(id);
-            if (!r) return '';
-            var full = new monaco.Range(r.startLineNumber, 1, r.endLineNumber, model.getLineMaxColumn(r.endLineNumber));
+        // Use embedRanges (source of truth, kept in sync by the guard) so appended lines are captured
+        // and the slot COUNT always matches the C# original ranges the save round-trip expects.
+        return embedRanges.map(function (r) {
+            var full = new monaco.Range(r[0], 1, r[1], model.getLineMaxColumn(r[1]));
             return model.getValueInRange(full);
         });
     }
@@ -293,6 +320,20 @@
         saveSafetyTimer = setTimeout(function () {
             showToast('Save sent, but no confirmation came back. The edit may have saved — reopen the procedure to verify.', false);
         }, 90000);
+    }
+
+    // Surface the language-server state when completion comes back empty, so a down/starting LSP is
+    // visible instead of a silent "no suggestions". Throttled so auto-trigger completion can't spam it.
+    var _lastLspReport = 0;
+    function maybeReportLsp(status) {
+        if (!status || status === 'ok') return;
+        var now = (window.performance && performance.now) ? performance.now() : 0;
+        if (now && _lastLspReport && (now - _lastLspReport) < 6000) return;
+        _lastLspReport = now;
+        var msg = (status === 'not started' || status === 'starting')
+            ? 'Language server is starting — completion/hover will work in a few seconds. Try again.'
+            : 'LSP: ' + status;   // diagnostic (e.g. timeout, server error, raw=0 = wrong/old server)
+        showToast(msg, false);
     }
 
     function showToast(message, ok, persist) {
@@ -356,19 +397,48 @@
     }
 
     // ----- Read-only guard -----
-    // Monaco has no per-range readOnly. We mark editable slots as decorations (which track their
-    // own position as the doc changes) and revert any edit whose location is not inside a live
-    // editable decoration. Generated lines carry no editable decoration, so edits there are undone.
+    // Monaco has no per-range readOnly. embedRanges (1-based inclusive [start,end] line spans) is the
+    // SOURCE OF TRUTH for what's editable; the decorations are derived from it (purely visual). Each
+    // edit is judged against the PRE-EDIT ranges, then its net line delta is folded back in. This is
+    // why appending lines to a slot works: a newline typed at a slot's last line reads as an edit ON
+    // that (editable) line, so it's allowed and the slot grows to cover the new line. (The earlier
+    // decoration-edge scheme failed to grow onto a freshly-created trailing line — a single-line/empty
+    // slot couldn't gain a second line at all.)
     function isEditableRange(range) {
-        if (!editor) return false;
-        var model = editor.getModel();
-        for (var i = 0; i < embedDecorations.length; i++) {
-            var dr = model.getDecorationRange(embedDecorations[i]);
-            if (!dr) continue;
-            if (range.startLineNumber >= dr.startLineNumber && range.endLineNumber <= dr.endLineNumber)
+        if (!range) return false;
+        for (var i = 0; i < embedRanges.length; i++) {
+            if (range.startLineNumber >= embedRanges[i][0] && range.endLineNumber <= embedRanges[i][1])
                 return true;
         }
         return false;
+    }
+
+    // Fold each legal change's net line delta into embedRanges. Monaco delivers changes in descending
+    // document order, so each change's pre-edit line numbers stay valid against ranges not yet shifted
+    // by an earlier-processed (later-in-document) change. A change inside a slot resizes that slot; a
+    // change entirely above a slot shifts the whole slot. Returns true if any range changed.
+    function applyChangesToRanges(changes) {
+        var changed = false;
+        for (var c = 0; c < changes.length; c++) {
+            var ch = changes[c];
+            var startLine = ch.range.startLineNumber;
+            var endLine = ch.range.endLineNumber;
+            var newlines = (ch.text.match(/\n/g) || []).length;
+            var delta = newlines - (endLine - startLine);
+            if (delta === 0) continue;
+            for (var i = 0; i < embedRanges.length; i++) {
+                var s = embedRanges[i][0], e2 = embedRanges[i][1];
+                if (s > endLine) {                       // slot entirely below the change → shift down/up
+                    embedRanges[i][0] = s + delta;
+                    embedRanges[i][1] = e2 + delta;
+                    changed = true;
+                } else if (s <= startLine && e2 >= startLine) { // the slot containing the change → resize
+                    embedRanges[i][1] = Math.max(s, e2 + delta);
+                    changed = true;
+                }
+            }
+        }
+        return changed;
     }
 
     function installReadOnlyGuard() {
@@ -382,8 +452,52 @@
                 guarding = true;
                 editor.trigger('readonly-guard', 'undo', null);
                 guarding = false;
+                return;
             }
+            // Legal edit — fold its line delta into embedRanges, re-render decorations if the spans
+            // moved, then refresh squiggles (debounced).
+            if (applyChangesToRanges(e.changes)) {
+                guarding = true;
+                applyEmbedDecorations();
+                guarding = false;
+            }
+            scheduleDiagnostics();
         });
+    }
+
+    // ----- Diagnostics (squiggles) -----
+    // Hybrid: the C# host runs the Clarion LSP's structural checks (clamped to editable slots) plus
+    // per-slot structure-balance and undefined-routine checks, and returns a unified marker list.
+    // We pass the LIVE editable ranges (decorations track slot growth as the user types) so the host
+    // maps markers to accurate absolute line numbers.
+    var diagTimer = null;
+
+    function liveEditableRanges() {
+        // embedRanges is the source of truth (kept in sync by the read-only guard).
+        return embedRanges.map(function (r) { return [r[0], r[1]]; });
+    }
+
+    function refreshDiagnostics() {
+        if (!editor) return;
+        var model = editor.getModel();
+        requestFromHost('diagnostics', { buffer: model.getValue(), ranges: liveEditableRanges() })
+            .then(function (resp) {
+                var markers = (resp && resp.markers) || [];
+                monaco.editor.setModelMarkers(model, 'clarion', markers.map(function (m) {
+                    return {
+                        severity: m.severity,
+                        message: m.message,
+                        startLineNumber: m.line, startColumn: m.column,
+                        endLineNumber: m.endLine, endColumn: m.endColumn
+                    };
+                }));
+            })
+            .catch(function () { /* never let a failed diagnostics round-trip disrupt editing */ });
+    }
+
+    function scheduleDiagnostics() {
+        if (diagTimer) clearTimeout(diagTimer);
+        diagTimer = setTimeout(refreshDiagnostics, 600);
     }
 
     // Clarion code folding: data/control structures close with END (or a lone '.'); PROCEDURE and
@@ -445,6 +559,7 @@
                 return requestFromHost('completion', { line: position.lineNumber, column: position.column })
                     .then(function (resp) {
                         var items = (resp && resp.items) || [];
+                        if (!items.length) maybeReportLsp(resp && resp.lsp);
                         return { suggestions: items.map(function (it) { return toMonacoCompletion(it, range); }) };
                     })
                     .catch(function () { return { suggestions: [] }; });
@@ -466,7 +581,14 @@
     function registerClarionLanguage() {
         monaco.languages.setLanguageConfiguration('clarion', {
             comments: { lineComment: '!' },
-            brackets: [['(', ')'], ['[', ']'], ['{', '}']]
+            brackets: [['(', ')'], ['[', ']'], ['{', '}']],
+            // Smart auto-indent on Enter (active when autoIndent='full'): indent the body of block
+            // structures, outdent on END / lone '.' / CASE & IF sub-keywords. The negative lookahead
+            // skips one-line forms that self-terminate with a trailing '.' (e.g. IF x THEN y.).
+            indentationRules: {
+                increaseIndentPattern: /^\s*(IF|LOOP|CASE|BEGIN|EXECUTE|GROUP|QUEUE|RECORD|FILE|VIEW|REPORT|WINDOW|APPLICATION|MENUBAR|MENU|TOOLBAR|SHEET|TAB|OPTION|CLASS|INTERFACE|MAP|MODULE|ITEMIZE|JOIN|OF|OROF|ELSE|ELSIF)\b(?![^!]*\.\s*$).*$/i,
+                decreaseIndentPattern: /^\s*(END\b|\.\s*$|OF\b|OROF\b|ELSE\b|ELSIF\b|UNTIL\b|WHILE\b)/i
+            }
         });
         monaco.languages.setMonarchTokensProvider('clarion', {
             ignoreCase: true,
@@ -504,6 +626,78 @@
         });
     }
 
+    // ----- Editor settings (gear panel) -----
+    // Settings arrive from the host on load (setSource) and on broadcast (applySettings, when another
+    // tab changes them). Editing a control applies live AND posts to the host to persist + broadcast.
+    function applyEditorSettings(s) {
+        if (!editor || !s) return;
+        var opts = {};
+        if (typeof s.fontSize === 'number') opts.fontSize = s.fontSize;
+        opts.wordWrap = s.wordWrap ? 'on' : 'off';
+        opts.minimap = { enabled: !!s.minimap };
+        opts.autoIndent = s.autoIndent ? 'full' : 'keep';
+        editor.updateOptions(opts);
+        // tabSize / insertSpaces are MODEL options in Monaco, not editor options.
+        var model = editor.getModel();
+        if (model && typeof s.tabSize === 'number')
+            model.updateOptions({ tabSize: s.tabSize, insertSpaces: !!s.insertSpaces });
+        lastSettings = s;
+    }
+
+    function populateSettingsPanel(s) {
+        if (!s) return;
+        var el;
+        if ((el = document.getElementById('setTabSize')) && typeof s.tabSize === 'number') el.value = s.tabSize;
+        if ((el = document.getElementById('setInsertSpaces'))) el.checked = !!s.insertSpaces;
+        if ((el = document.getElementById('setAutoIndent'))) el.checked = !!s.autoIndent;
+        if ((el = document.getElementById('setWordWrap'))) el.checked = !!s.wordWrap;
+        if ((el = document.getElementById('setMinimap'))) el.checked = !!s.minimap;
+        if ((el = document.getElementById('setFontSize')) && typeof s.fontSize === 'number') el.value = s.fontSize;
+    }
+
+    function readSettingsPanel() {
+        function num(id, dflt, lo, hi) {
+            var v = parseInt((document.getElementById(id) || {}).value, 10);
+            if (isNaN(v)) return dflt;
+            return Math.max(lo, Math.min(hi, v));
+        }
+        function chk(id) { var e = document.getElementById(id); return !!(e && e.checked); }
+        return {
+            tabSize: num('setTabSize', 2, 1, 16),
+            insertSpaces: chk('setInsertSpaces'),
+            autoIndent: chk('setAutoIndent'),
+            wordWrap: chk('setWordWrap'),
+            minimap: chk('setMinimap'),
+            fontSize: num('setFontSize', 13, 6, 48)
+        };
+    }
+
+    function onSettingChanged() {
+        var s = readSettingsPanel();
+        applyEditorSettings(s);
+        postToHost({ action: 'saveSettings', settings: s }); // persist + broadcast to other tabs
+    }
+
+    function wireSettingsPanel() {
+        var btn = document.getElementById('settingsBtn');
+        if (btn) btn.addEventListener('click', function () {
+            var p = document.getElementById('settingsPanel');
+            if (p) p.classList.toggle('hidden');
+        });
+        var ids = ['setTabSize', 'setInsertSpaces', 'setAutoIndent', 'setWordWrap', 'setMinimap', 'setFontSize'];
+        for (var i = 0; i < ids.length; i++) {
+            var e = document.getElementById(ids[i]);
+            if (e) e.addEventListener('change', onSettingChanged);
+        }
+        // Close the panel on Escape for a tidy keyboard flow.
+        document.addEventListener('keydown', function (ev) {
+            if (ev.key === 'Escape') {
+                var p = document.getElementById('settingsPanel');
+                if (p && !p.classList.contains('hidden')) p.classList.add('hidden');
+            }
+        });
+    }
+
     // ----- Messages from C# host -----
     if (window.chrome && window.chrome.webview) {
         window.chrome.webview.addEventListener('message', function (e) {
@@ -527,6 +721,9 @@
                 insertTextAtCursor(msg.text);
             } else if (msg.type === 'gotoRoutine') {
                 gotoRoutine(msg.name);
+            } else if (msg.type === 'applySettings') {
+                applyEditorSettings(msg.settings);
+                populateSettingsPanel(msg.settings);
             }
         });
     }

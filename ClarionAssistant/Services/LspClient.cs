@@ -693,31 +693,43 @@ namespace ClarionAssistant.Services
         // requires version to increase monotonically across didOpen → didChange for a URI).
         private readonly Dictionary<string, int> _openDocuments = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
+        // Guards the document-sync state (_openDocuments + _lastSyncedHash) AND the matching
+        // didOpen/didChange notification so version assignment and the send are atomic. Multiple
+        // background threads sync the SAME synthetic .clw URI concurrently — Modern Embeditor hover
+        // (HandleHover), completion, document-symbols, AND the 600ms-debounced diagnostics pass all
+        // run on Task.Run threads. Without this, two threads computed the same nextVersion and sent
+        // out-of-order didChanges, desyncing the server's copy so hover resolved against a stale
+        // buffer and returned nothing. (Regression from the diagnostics feature; see ModernEmbeditor.)
+        private readonly object _docSyncLock = new object();
+
         private void EnsureDocumentOpen(string filePath)
         {
-            if (_openDocuments.ContainsKey(filePath)) return;
-            if (!File.Exists(filePath)) return;
-
-            string uri = FilePathToUri(filePath);
-            string content = File.ReadAllText(filePath);
-
-            string ext = Path.GetExtension(filePath).ToLower();
-            string languageId = ext == ".inc" || ext == ".clw" || ext == ".equ" ? "clarion" : "plaintext";
-
-            var parms = new Dictionary<string, object>
+            lock (_docSyncLock)
             {
-                { "textDocument", new Dictionary<string, object>
-                    {
-                        { "uri", uri },
-                        { "languageId", languageId },
-                        { "version", 1 },
-                        { "text", content }
-                    }
-                }
-            };
+                if (_openDocuments.ContainsKey(filePath)) return;
+                if (!File.Exists(filePath)) return;
 
-            SendNotification("textDocument/didOpen", parms);
-            _openDocuments[filePath] = 1;
+                string uri = FilePathToUri(filePath);
+                string content = File.ReadAllText(filePath);
+
+                string ext = Path.GetExtension(filePath).ToLower();
+                string languageId = ext == ".inc" || ext == ".clw" || ext == ".equ" ? "clarion" : "plaintext";
+
+                var parms = new Dictionary<string, object>
+                {
+                    { "textDocument", new Dictionary<string, object>
+                        {
+                            { "uri", uri },
+                            { "languageId", languageId },
+                            { "version", 1 },
+                            { "text", content }
+                        }
+                    }
+                };
+
+                SendNotification("textDocument/didOpen", parms);
+                _openDocuments[filePath] = 1;
+            }
         }
 
         /// <summary>
@@ -733,46 +745,49 @@ namespace ClarionAssistant.Services
 
         private void EnsureDocumentOpenWithText(string filePath, string text)
         {
-            string uri = FilePathToUri(filePath);
-            int hash = (text != null ? text.Length : 0) ^ (text != null ? text.GetHashCode() : 0);
-            int currentVersion;
-            if (_openDocuments.TryGetValue(filePath, out currentVersion))
+            lock (_docSyncLock)
             {
-                // Unchanged since last sync → nothing to send (avoids needless re-tokenize).
-                int lastHash;
-                if (_lastSyncedHash.TryGetValue(filePath, out lastHash) && lastHash == hash)
-                    return;
-
-                int nextVersion = currentVersion + 1;
-                var changes = new System.Collections.ArrayList
+                string uri = FilePathToUri(filePath);
+                int hash = (text != null ? text.Length : 0) ^ (text != null ? text.GetHashCode() : 0);
+                int currentVersion;
+                if (_openDocuments.TryGetValue(filePath, out currentVersion))
                 {
-                    new Dictionary<string, object> { { "text", text } }
-                };
-                var changeParms = new Dictionary<string, object>
-                {
-                    { "textDocument", new Dictionary<string, object> { { "uri", uri }, { "version", nextVersion } } },
-                    { "contentChanges", changes }
-                };
-                SendNotification("textDocument/didChange", changeParms);
-                _openDocuments[filePath] = nextVersion;
-                _lastSyncedHash[filePath] = hash;
-                return;
-            }
+                    // Unchanged since last sync → nothing to send (avoids needless re-tokenize).
+                    int lastHash;
+                    if (_lastSyncedHash.TryGetValue(filePath, out lastHash) && lastHash == hash)
+                        return;
 
-            var openParms = new Dictionary<string, object>
-            {
-                { "textDocument", new Dictionary<string, object>
+                    int nextVersion = currentVersion + 1;
+                    var changes = new System.Collections.ArrayList
                     {
-                        { "uri", uri },
-                        { "languageId", "clarion" },
-                        { "version", 1 },
-                        { "text", text }
-                    }
+                        new Dictionary<string, object> { { "text", text } }
+                    };
+                    var changeParms = new Dictionary<string, object>
+                    {
+                        { "textDocument", new Dictionary<string, object> { { "uri", uri }, { "version", nextVersion } } },
+                        { "contentChanges", changes }
+                    };
+                    SendNotification("textDocument/didChange", changeParms);
+                    _openDocuments[filePath] = nextVersion;
+                    _lastSyncedHash[filePath] = hash;
+                    return;
                 }
-            };
-            SendNotification("textDocument/didOpen", openParms);
-            _openDocuments[filePath] = 1;
-            _lastSyncedHash[filePath] = hash;
+
+                var openParms = new Dictionary<string, object>
+                {
+                    { "textDocument", new Dictionary<string, object>
+                        {
+                            { "uri", uri },
+                            { "languageId", "clarion" },
+                            { "version", 1 },
+                            { "text", text }
+                        }
+                    }
+                };
+                SendNotification("textDocument/didOpen", openParms);
+                _openDocuments[filePath] = 1;
+                _lastSyncedHash[filePath] = hash;
+            }
         }
 
         /// <summary>
@@ -796,36 +811,39 @@ namespace ClarionAssistant.Services
         {
             if (!File.Exists(filePath)) return;
 
-            int currentVersion;
-            if (!_openDocuments.TryGetValue(filePath, out currentVersion))
+            lock (_docSyncLock) // reentrant: EnsureDocumentOpen also takes _docSyncLock
             {
-                EnsureDocumentOpen(filePath);
-                return;
+                int currentVersion;
+                if (!_openDocuments.TryGetValue(filePath, out currentVersion))
+                {
+                    EnsureDocumentOpen(filePath);
+                    return;
+                }
+
+                string uri = FilePathToUri(filePath);
+                string content = File.ReadAllText(filePath);
+                int nextVersion = currentVersion + 1;
+
+                // LSP TextDocumentContentChangeEvent without `range` = full document replacement.
+                var changes = new System.Collections.ArrayList
+                {
+                    new Dictionary<string, object> { { "text", content } }
+                };
+
+                var parms = new Dictionary<string, object>
+                {
+                    { "textDocument", new Dictionary<string, object>
+                        {
+                            { "uri", uri },
+                            { "version", nextVersion }
+                        }
+                    },
+                    { "contentChanges", changes }
+                };
+
+                SendNotification("textDocument/didChange", parms);
+                _openDocuments[filePath] = nextVersion;
             }
-
-            string uri = FilePathToUri(filePath);
-            string content = File.ReadAllText(filePath);
-            int nextVersion = currentVersion + 1;
-
-            // LSP TextDocumentContentChangeEvent without `range` = full document replacement.
-            var changes = new System.Collections.ArrayList
-            {
-                new Dictionary<string, object> { { "text", content } }
-            };
-
-            var parms = new Dictionary<string, object>
-            {
-                { "textDocument", new Dictionary<string, object>
-                    {
-                        { "uri", uri },
-                        { "version", nextVersion }
-                    }
-                },
-                { "contentChanges", changes }
-            };
-
-            SendNotification("textDocument/didChange", parms);
-            _openDocuments[filePath] = nextVersion;
         }
 
         #endregion

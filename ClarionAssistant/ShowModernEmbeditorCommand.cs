@@ -24,6 +24,10 @@ namespace ClarionAssistant
         {
             try
             {
+                // Warm the language server as early as possible (idempotent, fire-and-forget) so
+                // completion/hover are ready by the time the Monaco view finishes loading.
+                try { EmbeditorCompletionService.LspStarter?.Invoke(); } catch { }
+
                 string title, source, error;
                 System.Collections.Generic.List<int[]> editableRanges;
                 bool ok = EmbeditorCompletionService.TryGetActiveEmbeditorSource(

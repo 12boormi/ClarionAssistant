@@ -19,6 +19,11 @@ namespace ClarionAssistant
         {
             try
             {
+                // Warm the language server NOW — opening the editor (picker → locator typing → mirror →
+                // WebView2 → Monaco) takes several seconds, so kicking the self-heal here usually has the
+                // LSP ready by the time the dev hovers / presses Ctrl+Space. Idempotent, fire-and-forget.
+                try { EmbeditorCompletionService.LspStarter?.Invoke(); } catch { }
+
                 var appTree = new AppTreeService();
                 var procs = appTree.GetProcedureDetails();
                 var names = (procs ?? new List<Dictionary<string, object>>())

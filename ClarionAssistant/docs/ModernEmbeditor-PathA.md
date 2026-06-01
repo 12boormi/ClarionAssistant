@@ -589,6 +589,43 @@ and `PollForSolutionChange` backstop all call `_toolRegistry.EnsureLspRunningInB
       one (this is Path B from §2 — a parallel modern editor that writes back through the embed
       mechanism). John believes it's possible. Worth scoping vs. continuing to augment ICSharpCode.
 
+### ✅ DIAGNOSTICS — RESOLVED via hybrid (2026-05-31, Charlie) — item 7
+
+**Investigation (settled from source, not black-box):** the deployed bundled LSP is byte-identical to
+`H:\DevLaptop\ClarionLSP\out\...\server.js` (v0.8.7, built from the 2026-03-17 commit; the newer
+`Clarion-Extension` fork @ 2026-04-12 with "skip missing-RETURN for PROC-attributed procedures" is NOT
+deployed). `server.ts:384` has exactly ONE `sendDiagnostics`, fed solely by
+`DiagnosticProvider.validateDocument` — no separate semantic pass. File-extension gate at `server.ts:359`
+validates only `.clw`/`.inc`/`.equ` (confirms `ToLspClwPath` is mandatory; `lastValidatedVersions` means a
+`didChange` must bump the version — `EnsureDocumentOpenWithText` does). The full validator set, all
+STRUCTURAL/declarative:
+  1. unterminated structure (IF/LOOP/CASE/GROUP/QUEUE/RECORD/FILE/CLASS/INTERFACE/MAP/MODULE/EXECUTE/BEGIN) → Error
+  2. unterminated OMIT/COMPILE → Error
+  3. FILE missing DRIVER / RECORD → Error
+  4. CASE: OROF without preceding OF → Error
+  5. EXECUTE expression is a string literal → Warning
+  6. CLASS/INTERFACE implements → **no-op** (empty body)
+  7. return-typed proc/method with no RETURN / all-empty RETURN → Error
+  8. QUEUE as direct CLASS property / nested QUEUE → Error
+**Zero** undefined-variable / undefined-routine / undefined-label / type / unused-var checks. And the
+validators run over the WHOLE generated buffer, so a user's unterminated IF in an embed slot is
+balanced/masked by surrounding generated ENDs (reports 0, or flags the wrong line near EOF) and markers on
+read-only generated lines are noise. ⇒ pure-LSP is near-useless for embed-slot editing.
+
+**Implemented hybrid** (`Services/ModernEmbeditorDiagnostics.Compute`):
+  - Pass 1 — LSP structural diagnostics, **clamped** to live editable slots (drops generated-line
+    noise/mislocations); LSP severity → Monaco MarkerSeverity.
+  - Pass 2 — **per-slot structure balance** (open/close stack; opener w/o END or '.' in the slot → Error;
+    stray END → Warning; IF one-liners + inline-self-terminated structures skipped to avoid false positives).
+  - Pass 3 — **undefined routine**: `DO <name>` where <name> ∉ `ClarionAppDataReader.ParseRoutines` (only
+    when ≥1 routine parsed, so a parse miss never false-positives). String/comment interiors blanked
+    (length-preserving `Sanitize`) so "END"/"IF"/"DO" inside literals don't trip detection.
+  - Wiring: JS `refreshDiagnostics()` (debounced 600ms on edit + once after load) sends buffer + LIVE
+    editable ranges (decorations track slot growth) → host `HandleDiagnostics` (off-UI-thread) →
+    `setModelMarkers`. Markers are 1-based with Monaco severities so JS renders with no translation.
+  - Known v1 limitation (miss, not false positive): a bare `IF x THEN y` with no terminator goes
+    unflagged (matches the editor's folding heuristic — conservative to avoid noise). Build 4.6.103.
+
 ### Debug scaffolding left in place (remove when diagnostics are settled)
 `EmbeditorCompletionService.RunCompletionTest` has a `--- diagnostics ---` dump (cached count,
 server notification counts, diag-cache URIs, rendered marker count) + `LspClient.LastCompletionDiagnostic`
