@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Modern Embeditor — Find &amp; Replace mockup</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #1e1e1e; color: #d4d4d4;
+    font-family: "Segoe UI", system-ui, sans-serif; font-size: 13px; }
+  .wrap { display: flex; flex-direction: column; height: 100vh; }
+
+  /* ---- faux editor toolbar ---- */
+  .ed-toolbar { display: flex; align-items: center; gap: 10px; padding: 6px 10px;
+    background: #252526; border-bottom: 1px solid #333; }
+  .ed-toolbar .title { color: #9cdcfe; font-weight: 600; }
+  .ed-toolbar .sub { color: #808080; }
+  .ed-toolbar .spacer { flex: 1; }
+  .ed-toolbar button { background: #0e639c; color: #fff; border: none; border-radius: 3px;
+    padding: 3px 10px; cursor: pointer; }
+  .ed-toolbar .gear { background: #3a3d41; }
+
+  /* ---- faux code area ---- */
+  .code { flex: 1; overflow: auto; padding: 6px 0; font-family: Consolas, "Courier New", monospace;
+    font-size: 13px; line-height: 19px; }
+  .code .ln { display: flex; }
+  .code .ln .gut { width: 46px; text-align: right; padding-right: 12px; color: #6e7681; user-select: none; }
+  .code .ln .txt { white-space: pre; }
+  .code .ln.ro { background: #232323; }            /* read-only generated region tint */
+  .code .ln.edit { background: #1e1e1e; }
+  .kw  { color: #569cd6; }
+  .str { color: #ce9178; }
+  .com { color: #6a9955; }
+  .hit { background: #515c0f; color: #fff; border-radius: 2px; }      /* match highlight */
+  .hit.cur { background: #f5c518; color: #000; }                     /* current match */
+
+  /* ---- Find & Replace docked panel ---- */
+  .find { border-top: 2px solid #0e639c; background: #1b1b1b; display: flex; flex-direction: column;
+    height: 320px; }
+  .find .grip { height: 5px; cursor: ns-resize; background: #2a2a2a; }
+  .find .rows { padding: 8px 10px 6px; display: flex; flex-direction: column; gap: 6px; }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .row label.lbl { width: 84px; color: #cccccc; }
+
+  .combo { position: relative; flex: 1; max-width: 520px; }
+  .combo input { width: 100%; background: #3c3c3c; color: #eee; border: 1px solid #555;
+    border-radius: 3px; padding: 4px 26px 4px 8px; }
+  .combo input:focus { outline: none; border-color: #0e639c; }
+  .combo .caret { position: absolute; right: 4px; top: 3px; width: 20px; height: 22px;
+    display: flex; align-items: center; justify-content: center; color: #aaa; cursor: pointer;
+    border-left: 1px solid #555; }
+  .combo .hist { position: absolute; left: 0; right: 0; top: 100%; z-index: 20;
+    background: #2d2d2d; border: 1px solid #555; border-top: none; border-radius: 0 0 3px 3px;
+    box-shadow: 0 6px 16px rgba(0,0,0,.5); }
+  .combo .hist div { padding: 4px 10px; cursor: pointer; }
+  .combo .hist div:hover { background: #094771; }
+  .combo .hist div .x { float: right; color: #888; }
+
+  .toggles { display: flex; gap: 3px; }
+  .tg { width: 26px; height: 26px; border: 1px solid #555; background: #2d2d2d; color: #ccc;
+    border-radius: 3px; cursor: pointer; font-size: 12px; display: flex; align-items: center;
+    justify-content: center; }
+  .tg.on { background: #094771; border-color: #0e639c; color: #fff; }
+
+  .iconbtn { width: 28px; height: 28px; border: 1px solid #555; background: #2d2d2d; color: #ddd;
+    border-radius: 3px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  .iconbtn:hover { background: #37373d; }
+  .iconbtn.search { background: #0e639c; border-color: #0e639c; }
+  .btn { background: #3a3d41; color: #fff; border: 1px solid #555; border-radius: 3px;
+    padding: 4px 10px; cursor: pointer; }
+  .btn.primary { background: #0e639c; border-color: #0e639c; }
+  .count { color: #9d9d9d; margin-left: 4px; white-space: nowrap; }
+
+  /* results toolbar */
+  .res-tools { display: flex; align-items: center; gap: 12px; padding: 4px 10px;
+    border-top: 1px solid #2a2a2a; background: #202020; }
+  .res-tools .link { color: #3794ff; cursor: pointer; display: flex; align-items: center; gap: 4px; }
+  .res-tools .spacer { flex: 1; }
+
+  /* results grid */
+  .grid { flex: 1; overflow: auto; }
+  table { width: 100%; border-collapse: collapse; font-family: Consolas, monospace; font-size: 12.5px; }
+  thead th { position: sticky; top: 0; background: #252526; color: #9d9d9d; text-align: left;
+    font-weight: 600; padding: 4px 8px; border-bottom: 1px solid #333; font-family: "Segoe UI"; }
+  tbody td { padding: 2px 8px; border-bottom: 1px solid #262626; white-space: pre; }
+  tbody tr:hover { background: #2a2d2e; cursor: pointer; }
+  tbody tr.sel { background: #094771; }
+  .c-chk { width: 26px; }
+  .c-line { width: 56px; color: #6e7681; text-align: right; }
+  .c-lock { width: 24px; text-align: center; }
+  .ro-badge { color: #b08000; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- faux editor toolbar -->
+  <div class="ed-toolbar">
+    <span class="title">UpdateCustomer (ABC Browse)</span>
+    <span class="sub">· 6 editable slot(s)</span>
+    <span class="spacer"></span>
+    <button>Save</button>
+    <button class="gear">⚙</button>
+  </div>
+
+  <!-- faux code -->
+  <div class="code">
+    <div class="ln ro"><span class="gut">118</span><span class="txt"><span class="com">! [Priority 5000]</span></span></div>
+    <div class="ln edit"><span class="gut">119</span><span class="txt">  <span class="kw">IF</span> <span class="hit cur">Customer</span>:Status = <span class="str">'A'</span></span></div>
+    <div class="ln edit"><span class="gut">120</span><span class="txt">    DO Refresh<span class="hit">Customer</span>Window</span></div>
+    <div class="ln ro"><span class="gut">121</span><span class="txt"><span class="com">! Generated by ABC — do not edit</span></span></div>
+    <div class="ln ro"><span class="gut">122</span><span class="txt">  GlobalRequest = SelectRecord(<span class="hit">Customer</span>)</span></div>
+    <div class="ln edit"><span class="gut">123</span><span class="txt">  <span class="kw">END</span></span></div>
+    <div class="ln edit"><span class="gut">124</span><span class="txt">  Access:<span class="hit">Customer</span>.TryFetch(CUS:KeyID)</span></div>
+  </div>
+
+  <!-- Find & Replace docked panel -->
+  <div class="find">
+    <div class="grip"></div>
+    <div class="rows">
+
+      <!-- find row -->
+      <div class="row">
+        <label class="lbl">Find what</label>
+        <div class="combo">
+          <input value="Customer" />
+          <div class="caret">▾</div>
+          <!-- history dropdown (shown open for the mockup) -->
+          <div class="hist">
+            <div>Customer <span class="x">✕</span></div>
+            <div>TryFetch <span class="x">✕</span></div>
+            <div>GlobalRequest <span class="x">✕</span></div>
+          </div>
+        </div>
+        <button class="iconbtn search" title="Find (Enter)">🔍</button>
+        <div class="toggles">
+          <div class="tg" title="Match Case">Aa</div>
+          <div class="tg" title="Whole Word">ab</div>
+          <div class="tg on" title="Regex">.*</div>
+        </div>
+        <span class="count">5 matches · 5 lines</span>
+        <span class="spacer"></span>
+        <button class="iconbtn" title="Clear search history">🧹</button>
+      </div>
+
+      <!-- replace row -->
+      <div class="row">
+        <label class="lbl">Replace with</label>
+        <div class="combo">
+          <input value="Client" />
+          <div class="caret">▾</div>
+        </div>
+        <button class="btn" title="Replace checked rows (editable slots only)">Replace Selected</button>
+        <button class="btn primary" title="Replace all matches in editable slots">Replace All</button>
+        <span class="spacer"></span>
+        <button class="iconbtn" title="Clear replace history">🧹</button>
+      </div>
+    </div>
+
+    <!-- results toolbar -->
+    <div class="res-tools">
+      <span class="link">▣ Select All</span>
+      <span class="link">▢ Select None</span>
+      <span class="spacer"></span>
+      <span class="link">⧉ Copy</span>
+      <span class="link">🧹 Clear results</span>
+    </div>
+
+    <!-- results grid -->
+    <div class="grid">
+      <table>
+        <thead>
+          <tr><th class="c-chk"></th><th class="c-line">Line</th><th class="c-lock"></th><th>Code</th></tr>
+        </thead>
+        <tbody>
+          <tr class="sel"><td class="c-chk"><input type="checkbox" checked></td><td class="c-line">119</td><td class="c-lock"></td><td>  IF <span class="hit">Customer</span>:Status = 'A'</td></tr>
+          <tr><td class="c-chk"><input type="checkbox" checked></td><td class="c-line">120</td><td class="c-lock"></td><td>    DO Refresh<span class="hit">Customer</span>Window</td></tr>
+          <tr><td class="c-chk"><input type="checkbox" disabled></td><td class="c-line">122</td><td class="c-lock"><span class="ro-badge" title="Read-only generated region — found but not replaceable">🔒</span></td><td>  GlobalRequest = SelectRecord(<span class="hit">Customer</span>)</td></tr>
+          <tr><td class="c-chk"><input type="checkbox" checked></td><td class="c-line">124</td><td class="c-lock"></td><td>  Access:<span class="hit">Customer</span>.TryFetch(CUS:KeyID)</td></tr>
+          <tr><td class="c-chk"><input type="checkbox" disabled></td><td class="c-line">147</td><td class="c-lock"><span class="ro-badge">🔒</span></td><td>  Relate:<span class="hit">Customer</span>.Open()</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+</body>
+</html>

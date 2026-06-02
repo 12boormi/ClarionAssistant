@@ -1,5 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Reflection;
+using System.Text;
+using System.Web.Script.Serialization;
 
 namespace ClarionAssistant.Services
 {
@@ -115,6 +119,194 @@ namespace ClarionAssistant.Services
                 try { return Convert.ToBoolean(o); } catch { }
             }
             return dflt;
+        }
+    }
+
+    /// <summary>
+    /// Persists the Modern Embeditor's Find/Replace dropdown history to a dedicated per-Clarion-version,
+    /// per-solution JSON file:
+    ///   %APPDATA%\ClarionAssistant\&lt;ClarionVersion&gt;\&lt;Solution&gt;\find-history.json
+    /// (e.g. ...\Clarion12\MyApp\find-history.json). The file holds solution-wide "find"/"replace" lists
+    /// plus a "procFind" map of per-procedure recent search terms, which powers the layered Find dropdown
+    /// ("This procedure" group on top, full solution list below). Solution-wide lists are authoritative on
+    /// save (so delete/clear stick) and broadcast across tabs; the procFind map is merged per-procedure-key
+    /// so concurrent tabs (different procedures) don't clobber each other.
+    /// Version folder: running IDE config (ClarionVersionService) → addin install root → "Default".
+    /// </summary>
+    public static class ModernEmbeditorHistory
+    {
+        private const int Cap = 25;       // solution-wide list cap
+        private const int ProcCap = 10;   // per-procedure recent cap
+        private static string _versionTag;
+
+        /// <summary>Load solution-wide find/replace plus this procedure's recent terms.</summary>
+        public static void Load(string solutionPath, string procKey,
+            out List<string> find, out List<string> replace, out List<string> proc)
+        {
+            find = new List<string>(); replace = new List<string>(); proc = new List<string>();
+            try
+            {
+                string path = FilePath(solutionPath);
+                if (!File.Exists(path)) return;
+                var d = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }
+                    .DeserializeObject(File.ReadAllText(path)) as Dictionary<string, object>;
+                if (d == null) return;
+                find = Clean(ToList(d, "find"), Cap);
+                replace = Clean(ToList(d, "replace"), Cap);
+                var procMap = GetMap(d, "procFind");
+                object pv;
+                if (!string.IsNullOrEmpty(procKey) && procMap.TryGetValue(procKey, out pv) && pv is object[])
+                    proc = Clean(ToList((object[])pv), ProcCap);
+            }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernEmbeditorHistory] Load: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// Persist solution-wide find/replace (authoritative) and this procedure's recent terms (merged into
+        /// the procFind map, preserving every other procedure's list). Outputs the cleaned solution-wide
+        /// lists for the cross-tab broadcast.
+        /// </summary>
+        public static void Save(string solutionPath, string procKey,
+            IList<string> find, IList<string> replace, IList<string> proc,
+            out List<string> savedFind, out List<string> savedReplace)
+        {
+            savedFind = Clean(find, Cap);
+            savedReplace = Clean(replace, Cap);
+            try
+            {
+                string path = FilePath(solutionPath);
+
+                // Preserve other procedures' lists: start from the existing procFind map, update only ours.
+                var procFind = new Dictionary<string, object>();
+                try
+                {
+                    if (File.Exists(path))
+                    {
+                        var existing = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }
+                            .DeserializeObject(File.ReadAllText(path)) as Dictionary<string, object>;
+                        var map = GetMap(existing, "procFind");
+                        foreach (var kv in map)
+                            if (kv.Value is object[]) procFind[kv.Key] = Clean(ToList((object[])kv.Value), ProcCap);
+                    }
+                }
+                catch { }
+                if (!string.IsNullOrEmpty(procKey)) procFind[procKey] = Clean(proc, ProcCap);
+
+                var payload = new JavaScriptSerializer().Serialize(new Dictionary<string, object>
+                {
+                    { "find", savedFind },
+                    { "replace", savedReplace },
+                    { "procFind", procFind }
+                });
+                File.WriteAllText(path, payload, Encoding.UTF8);
+            }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernEmbeditorHistory] Save: " + ex.Message); }
+        }
+
+        public static string ToJson(IList<string> list)
+        {
+            try { return new JavaScriptSerializer().Serialize(list ?? new List<string>()); }
+            catch { return "[]"; }
+        }
+
+        /// <summary>Absolute path to the version+solution history file (folders created on demand).</summary>
+        private static string FilePath(string solutionPath)
+        {
+            string dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "ClarionAssistant", VersionTag(), SolutionTag(solutionPath));
+            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            return Path.Combine(dir, "find-history.json");
+        }
+
+        /// <summary>Folder-safe tag for the open solution (its file name without extension), or "NoSolution".</summary>
+        public static string SolutionTag(string solutionPath)
+        {
+            if (string.IsNullOrEmpty(solutionPath)) return "NoSolution";
+            string leaf;
+            try { leaf = Path.GetFileNameWithoutExtension(solutionPath.TrimEnd('\\', '/')); }
+            catch { leaf = null; }
+            if (string.IsNullOrEmpty(leaf)) { try { leaf = Path.GetFileName(solutionPath.TrimEnd('\\', '/')); } catch { } }
+            return Sanitize(string.IsNullOrEmpty(leaf) ? "NoSolution" : leaf);
+        }
+
+        /// <summary>
+        /// Folder-safe tag for the active Clarion version (e.g. "Clarion12"). Prefers the running IDE's
+        /// current version config; falls back to the addin's install root; then "Default".
+        /// </summary>
+        public static string VersionTag()
+        {
+            if (_versionTag != null) return _versionTag;
+            string tag = null;
+            try
+            {
+                var cfg = ClarionVersionService.Detect()?.GetCurrentConfig();
+                string root = cfg != null ? cfg.RootPath : null;
+                if (!string.IsNullOrEmpty(root)) tag = Path.GetFileName(root.TrimEnd('\\', '/'));
+            }
+            catch { }
+            if (string.IsNullOrEmpty(tag))
+            {
+                try
+                {
+                    // Deployed layout: <ClarionRoot>\accessory\addins\ClarionAssistant\ClarionAssistant.dll
+                    var dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+                    var d = new DirectoryInfo(dir);
+                    if (d != null && d.Parent != null && d.Parent.Parent != null &&
+                        string.Equals(d.Parent.Name, "addins", StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(d.Parent.Parent.Name, "accessory", StringComparison.OrdinalIgnoreCase) &&
+                        d.Parent.Parent.Parent != null)
+                        tag = d.Parent.Parent.Parent.Name;
+                }
+                catch { }
+            }
+            _versionTag = Sanitize(string.IsNullOrEmpty(tag) ? "Default" : tag);
+            return _versionTag;
+        }
+
+        private static string Sanitize(string name)
+        {
+            if (name == null) return "Default";
+            foreach (char c in Path.GetInvalidFileNameChars())
+                name = name.Replace(c, '_');
+            name = name.Trim();
+            return string.IsNullOrEmpty(name) ? "Default" : name;
+        }
+
+        private static Dictionary<string, object> GetMap(IDictionary<string, object> d, string key)
+        {
+            object o;
+            if (d != null && d.TryGetValue(key, out o) && o is Dictionary<string, object>)
+                return (Dictionary<string, object>)o;
+            return new Dictionary<string, object>();
+        }
+
+        private static List<string> ToList(IDictionary<string, object> d, string key)
+        {
+            object o;
+            if (d != null && d.TryGetValue(key, out o) && o is object[]) return ToList((object[])o);
+            return new List<string>();
+        }
+
+        private static List<string> ToList(object[] arr)
+        {
+            var res = new List<string>();
+            if (arr != null) foreach (var item in arr) if (item != null) res.Add(item.ToString());
+            return res;
+        }
+
+        private static List<string> Clean(IList<string> list, int cap)
+        {
+            var outp = new List<string>();
+            if (list == null) return outp;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var s in list)
+            {
+                if (outp.Count >= cap) break;
+                if (string.IsNullOrEmpty(s) || seen.Contains(s)) continue;
+                seen.Add(s); outp.Add(s);
+            }
+            return outp;
         }
     }
 }

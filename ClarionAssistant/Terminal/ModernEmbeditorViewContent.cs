@@ -47,6 +47,12 @@ namespace ClarionAssistant.Terminal
         private string _tempDir;
         private const string VIRTUAL_HOST = "clarion-embeditor-data";
 
+        // Find/Replace history scope: per-version (storage layer) + per-solution (folder) + per-procedure
+        // (the "This procedure" group). Resolved once from the IDE when the page first asks for source.
+        private string _histSolutionPath;
+        private string _histProcKey;
+        private bool _histScopeResolved;
+
         private static readonly List<ModernEmbeditorViewContent> _instances = new List<ModernEmbeditorViewContent>();
 
         public override Control Control { get { return _panel; } }
@@ -366,6 +372,8 @@ namespace ClarionAssistant.Terminal
                     HandleDiagnostics(json);
                 else if (action == "saveSettings")
                     HandleSaveSettings(json);
+                else if (action == "saveHistory")
+                    HandleSaveHistory(json);
             }
             catch (Exception ex)
             {
@@ -603,6 +611,83 @@ namespace ClarionAssistant.Terminal
             lock (_instances) { foreach (var inst in _instances) inst.ApplySettings(settings); }
         }
 
+        /// <summary>
+        /// Persist the Find/Replace dropdown history (sent by JS as full arrays) and broadcast the saved
+        /// lists to every open tab so all tabs converge. The incoming list is authoritative, so per-entry
+        /// delete and "clear history" stick. Persist failures are logged but never block the broadcast.
+        /// </summary>
+        private void HandleSaveHistory(string json)
+        {
+            try
+            {
+                var data = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(json) as Dictionary<string, object>;
+                if (data == null) return;
+                var find = ToStringList(data, "find");
+                var replace = ToStringList(data, "replace");
+                var proc = ToStringList(data, "proc");
+                EnsureHistoryScope();
+                List<string> savedFind, savedReplace;
+                ModernEmbeditorHistory.Save(_histSolutionPath, _histProcKey, find, replace, proc, out savedFind, out savedReplace);
+                // Broadcast solution-wide lists only — each tab keeps its own procedure's recent terms.
+                ApplyHistoryToAll(savedFind, savedReplace);
+            }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernEmbeditor] saveHistory: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// Resolve (once) the history scope from the IDE: the open solution (folder) and an app::procedure
+        /// key (the "This procedure" group). Cached for this tab's lifetime.
+        /// </summary>
+        private void EnsureHistoryScope()
+        {
+            if (_histScopeResolved) return;
+            _histScopeResolved = true;
+            try { _histSolutionPath = EditorService.GetOpenSolutionPath(); } catch { _histSolutionPath = null; }
+            string appName = null;
+            try
+            {
+                var info = new AppTreeService().GetAppInfo();
+                if (info != null && info.ContainsKey("name") && info["name"] != null) appName = info["name"].ToString();
+            }
+            catch { }
+            string key = ((appName ?? "") + "::" + (_procedureName ?? "")).Trim(':');
+            _histProcKey = string.IsNullOrEmpty(key) ? "" : key;
+        }
+
+        /// <summary>Coerce a JSON array field (object[] from DeserializeObject) into a string list.</summary>
+        private static List<string> ToStringList(Dictionary<string, object> d, string key)
+        {
+            var res = new List<string>();
+            object o;
+            if (d != null && d.TryGetValue(key, out o) && o is object[])
+            {
+                foreach (var item in (object[])o)
+                    if (item != null) res.Add(item.ToString());
+            }
+            return res;
+        }
+
+        /// <summary>Push Find/Replace history to this tab's dropdowns.</summary>
+        public void ApplyHistory(IList<string> find, IList<string> replace)
+        {
+            string fj = ModernEmbeditorHistory.ToJson(find);
+            string rj = ModernEmbeditorHistory.ToJson(replace);
+            Action post = () =>
+            {
+                if (_webView == null || _webView.CoreWebView2 == null) return;
+                try { _webView.CoreWebView2.PostWebMessageAsJson("{\"type\":\"applyHistory\",\"find\":" + fj + ",\"replace\":" + rj + "}"); }
+                catch { }
+            };
+            try { if (_panel != null && _panel.InvokeRequired) _panel.BeginInvoke(post); else post(); }
+            catch { }
+        }
+
+        /// <summary>Broadcast Find/Replace history to all open Modern Embeditor tabs.</summary>
+        public static void ApplyHistoryToAll(IList<string> find, IList<string> replace)
+        {
+            lock (_instances) { foreach (var inst in _instances) inst.ApplyHistory(find, replace); }
+        }
+
         private bool ParseRequest(string json, out int reqId, out int line, out int column, out string buffer)
         {
             reqId = 0; line = 0; column = 0; buffer = null;
@@ -742,6 +827,18 @@ namespace ClarionAssistant.Terminal
                 try { settingsJson = new JavaScriptSerializer().Serialize(ModernEmbeditorSettings.Load().ToDict()); }
                 catch { settingsJson = "null"; }
 
+                string findHistJson = "[]", replHistJson = "[]", procHistJson = "[]";
+                try
+                {
+                    EnsureHistoryScope();
+                    List<string> hf, hr, hp;
+                    ModernEmbeditorHistory.Load(_histSolutionPath, _histProcKey, out hf, out hr, out hp);
+                    findHistJson = ModernEmbeditorHistory.ToJson(hf);
+                    replHistJson = ModernEmbeditorHistory.ToJson(hr);
+                    procHistJson = ModernEmbeditorHistory.ToJson(hp);
+                }
+                catch { }
+
                 string json = "{\"type\":\"setSource\"," +
                     "\"title\":" + JsonString(_title) + "," +
                     "\"language\":" + JsonString(_language) + "," +
@@ -749,6 +846,9 @@ namespace ClarionAssistant.Terminal
                     "\"saveEnabled\":" + (_saveEnabled ? "true" : "false") + "," +
                     "\"editableRanges\":" + RangesJson() + "," +
                     "\"settings\":" + settingsJson + "," +
+                    "\"findHistory\":" + findHistJson + "," +
+                    "\"replaceHistory\":" + replHistJson + "," +
+                    "\"procHistory\":" + procHistJson + "," +
                     "\"sourceUrl\":\"https://" + VIRTUAL_HOST + "/source.txt\"}";
                 _webView.CoreWebView2.PostWebMessageAsJson(json);
             }
