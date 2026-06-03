@@ -136,6 +136,51 @@ namespace ClarionAssistant.Terminal
             }
         }
 
+        /// <summary>Recursively flatten a parsed FieldDef (with nested QUEUE/GROUP members) into the
+        /// JSON-ready dictionary the Data pad consumes. Children are only emitted when present.</summary>
+        private static Dictionary<string, object> FieldToDict(ClarionAppDataReader.FieldDef d)
+        {
+            var dict = new Dictionary<string, object> { { "name", d.Name }, { "type", d.Type } };
+            // Display metadata — only present when sourced from the .txa (ParseTxaProcedureData).
+            if (!string.IsNullOrEmpty(d.Picture)) dict["picture"] = d.Picture;
+            if (!string.IsNullOrEmpty(d.Prompt)) dict["prompt"] = d.Prompt;
+            if (!string.IsNullOrEmpty(d.Header)) dict["header"] = d.Header;
+            if (d.Children != null && d.Children.Count > 0)
+            {
+                var kids = new List<object>();
+                foreach (var c in d.Children) kids.Add(FieldToDict(c));
+                dict["children"] = kids;
+            }
+            return dict;
+        }
+
+        // Whole-app .txa text, exported on the UI thread (open + save) and parsed per-proc on the pad's
+        // background refresh. Static so it's shared across all Modern Embeditor tabs for the same app.
+        private static readonly object _txaLock = new object();
+        private static string _wholeAppTxa;
+
+        /// <summary>
+        /// Export the whole app to a temp .txa and cache its text for Local Data sourcing. Whole-app
+        /// Export(path, all=TRUE) is SILENT + fast (validated live) — UNLIKE proc-only export which pops a
+        /// modal. MUST be called on the UI thread only (it drives the IDE); never from GetPadData, which
+        /// runs on a background thread (a background export is the re-entrancy that locks the IDE). On any
+        /// failure the prior cache is kept and GetPadData falls back to the embeditor-source parse.
+        /// </summary>
+        public static void RefreshWholeAppTxa()
+        {
+            try
+            {
+                string tmp = Path.Combine(Path.GetTempPath(), "ClarionModernData_wholeapp.txa");
+                string res = new AppTreeService().ExportTxa(tmp);
+                if (string.IsNullOrEmpty(res) || res.StartsWith("Error")) return; // keep prior cache
+                if (!File.Exists(tmp)) return;
+                string text = File.ReadAllText(tmp);
+                if (!string.IsNullOrEmpty(text))
+                    lock (_txaLock) { _wholeAppTxa = text; }
+            }
+            catch { /* keep prior cache; GetPadData falls back to embeditor-source */ }
+        }
+
         /// <summary>
         /// Combined data payload for the Modern Data pad: the procedure's local symbols (LSP) plus the
         /// dictionary tables it references (parsed from the generated &lt;app&gt;.clw, filtered to used ones).
@@ -147,8 +192,20 @@ namespace ClarionAssistant.Terminal
             var globals = new List<Dictionary<string, object>>();
             try
             {
-                foreach (var d in ClarionAppDataReader.ParseLocalData(_sourceText, _procedureName))
-                    locals.Add(new Dictionary<string, object> { { "name", d.Name }, { "type", d.Type } });
+                // Prefer the AUTHORITATIVE .txa source (declaration order + pictures + exact Clarion item
+                // set). Falls back to the embeditor-source parse when the whole-app .txa isn't cached yet.
+                List<ClarionAppDataReader.FieldDef> localDefs = null;
+                string txa; lock (_txaLock) { txa = _wholeAppTxa; }
+                if (!string.IsNullOrEmpty(txa) && !string.IsNullOrEmpty(_procedureName))
+                {
+                    var fromTxa = ClarionAppDataReader.ParseTxaProcedureData(txa, _procedureName);
+                    if (fromTxa.Count > 0) localDefs = fromTxa;
+                }
+                if (localDefs == null)
+                    localDefs = ClarionAppDataReader.ParseLocalData(_sourceText, _procedureName);
+
+                foreach (var d in localDefs)
+                    locals.Add(FieldToDict(d));
 
                 foreach (var r in ClarionAppDataReader.ParseRoutines(_sourceText, _procedureName))
                     routines.Add(new Dictionary<string, object> { { "name", r }, { "type", "ROUTINE" } });
@@ -337,6 +394,10 @@ namespace ClarionAssistant.Terminal
                 string htmlPath = GetHtmlPath();
                 if (File.Exists(htmlPath))
                     _webView.CoreWebView2.Navigate(new Uri(htmlPath).AbsoluteUri + "?v=" + File.GetLastWriteTimeUtc(htmlPath).Ticks);
+
+                // On open (UI thread): cache the whole-app .txa so the Data pad's Local Data shows the
+                // app's registered items in declaration order WITH pictures. Silent whole-app export.
+                RefreshWholeAppTxa();
             }
             catch (Exception ex)
             {
@@ -415,6 +476,8 @@ namespace ClarionAssistant.Terminal
             if (ok && current.Count == _originalSlotTexts.Count) _originalSlotTexts = current;
             // The save activated the app tree to drive the embeditor — bring this tab back to the front.
             BringToFront();
+            // Re-export the whole-app .txa (UI thread) so the Data pad's Local Data reflects any change.
+            if (ok) RefreshWholeAppTxa();
             PostSaveResult(ok, msg);
         }
 

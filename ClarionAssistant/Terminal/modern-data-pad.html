@@ -6,30 +6,32 @@
 <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; font-family: 'Segoe UI', Tahoma, sans-serif; font-size: 12px;
-        background: #eff1f5; color: #4c4f69; overflow: hidden; }
+        background: #ffffff; color: #1f1f1f; overflow: hidden; }
     #bar { display: flex; align-items: center; gap: 8px; padding: 5px 8px;
-        background: #dce0e8; border-bottom: 1px solid #bcc0cc; height: 30px; }
-    #bar .title { font-weight: 600; color: #4c4f69; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    #bar button { font: inherit; padding: 2px 8px; border: 1px solid #acb0be; border-radius: 4px;
-        background: transparent; color: #1e66f5; cursor: pointer; }
-    #bar button:hover { background: #ccd0da; }
-    #filter { width: 100%; padding: 4px 8px; border: none; border-bottom: 1px solid #bcc0cc;
-        font: inherit; background: #e6e9ef; color: #4c4f69; }
-    #list { position: absolute; top: 56px; left: 0; right: 0; bottom: 0; overflow-y: auto; }
-    .section { font-weight: 600; color: #6c6f85; background: #e6e9ef; padding: 4px 10px;
-        border-top: 1px solid #bcc0cc; border-bottom: 1px solid #bcc0cc; }
+        background: #f3f3f3; border-bottom: 1px solid #d4d4d4; height: 30px; }
+    #bar .title { font-weight: 600; color: #1f1f1f; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #bar button { font: inherit; padding: 2px 8px; border: 1px solid #bcbcbc; border-radius: 4px;
+        background: transparent; color: #0a5dc2; cursor: pointer; }
+    #bar button:hover { background: #e4e8ee; }
+    #filter { width: 100%; padding: 4px 8px; border: none; border-bottom: 1px solid #d4d4d4;
+        font: inherit; background: #ffffff; color: #1f1f1f; }
+    #list { position: absolute; top: 56px; left: 0; right: 0; bottom: 0; overflow-y: auto; background: #ffffff; }
+    .section { font-weight: 600; color: #3a3a3a; background: #eef1f4; padding: 4px 10px;
+        border-top: 1px solid #d4d4d4; border-bottom: 1px solid #d4d4d4; }
     .row { display: flex; align-items: center; gap: 8px; padding: 3px 10px; cursor: pointer; user-select: none; }
-    .row:hover { background: #ccd0da; }
-    .row .kind { font-size: 10px; color: #8839ef; min-width: 56px; }
-    .row .name { color: #4c4f69; }
-    .row .type { font-size: 10px; color: #8c8fa1; margin-left: auto; }
-    .row .act { color: #1e66f5; cursor: pointer; min-width: 14px; text-align: center; opacity: 0.55; }
+    .row:hover { background: #e8eef7; }
+    .row .kind { font-size: 10px; color: #6f42c1; min-width: 56px; }
+    .row .name { color: #1f1f1f; }
+    .row .type { font-size: 10px; color: #5a5a5a; margin-left: auto; }
+    .row .picture { font-size: 10px; color: #0a7d3a; font-family: Consolas, 'Courier New', monospace; min-width: 40px; text-align: right; }
+    .row .act { color: #0a5dc2; cursor: pointer; min-width: 14px; text-align: center; opacity: 0.6; }
     .row .act:hover { opacity: 1; }
-    .table-hdr { font-weight: 600; color: #1e66f5; }
-    .table-hdr .twisty { color: #6c6f85; min-width: 12px; }
+    .twisty { color: #555; min-width: 12px; display: inline-block; text-align: center; }
+    .table-hdr { font-weight: 600; color: #0a5dc2; }
+    .table-hdr .twisty { color: #555; min-width: 12px; }
     .col-row { padding-left: 26px; }
-    .col-row .name { color: #d20f39; }
-    .empty { padding: 14px; color: #8c8fa1; }
+    .col-row .name { color: #b0152e; }
+    .empty { padding: 14px; color: #777777; }
 </style>
 </head>
 <body>
@@ -49,6 +51,7 @@
     var procedures = [];
     var collapsed = {};        // tableName -> true when a table's columns are collapsed
     var sectionCollapsed = {}; // section key -> true when a whole section is collapsed
+    var localCollapsed = {};   // local-tree node path -> true when a QUEUE/GROUP node is collapsed
 
     // LSP SymbolKind -> short label
     function kindLabel(k) {
@@ -144,7 +147,54 @@
             });
         }
 
-        flatSection('locals', 'Local Data', locals);
+        // ----- Local Data: declaration order, QUEUE/GROUP expandable to nested members -----
+        (function () {
+            var anyMatch = function (items) {
+                return (items || []).some(function (it) { return match(it.name) || anyMatch(it.children); });
+            };
+            var countAll = function (items) {
+                return (items || []).reduce(function (n, it) { return n + 1 + countAll(it.children); }, 0);
+            };
+            var shown = locals.filter(function (it) { return match(it.name) || anyMatch(it.children); });
+            if (!shown.length) return;
+            if (!sectionHeader('locals', 'Local Data', countAll(locals))) return;
+
+            var walk = function (items, depth, parentKey) {
+                items.forEach(function (it) {
+                    var kids = it.children || [];
+                    if (!match(it.name) && !anyMatch(kids)) return;
+                    var key = parentKey + '/' + (it.name || '');
+                    var hasKids = kids.length > 0;
+                    var open = hasKids && (!localCollapsed[key] || !!f);
+                    var tip = it.name + (it.type ? '  ' + it.type : '')
+                        + (it.picture ? '  ' + it.picture : '')
+                        + (it.prompt ? '\nPrompt: ' + it.prompt : '')
+                        + (it.header ? '\nHeader: ' + it.header : '');
+                    var row = makeRow(null, null, it.name, it.type || '', tip, it.name);
+                    // Picture column (right of type) — only present when sourced from the .txa.
+                    if (it.picture) {
+                        var pic = document.createElement('span');
+                        pic.className = 'picture'; pic.textContent = it.picture;
+                        row.appendChild(pic);
+                    }
+                    row.style.paddingLeft = (10 + depth * 16) + 'px';
+                    var tw = document.createElement('span');
+                    tw.className = 'twisty';
+                    tw.textContent = hasKids ? (open ? '▾' : '▸') : '';
+                    row.insertBefore(tw, row.firstChild);
+                    if (hasKids) {
+                        row.addEventListener('click', function (e) {
+                            if (e.detail > 1) return; // ignore the click half of a double-click
+                            localCollapsed[key] = !localCollapsed[key]; render();
+                        });
+                    }
+                    list.appendChild(row);
+                    if (open) walk(kids, depth + 1, key);
+                });
+            };
+            walk(locals, 0, '');
+        })();
+
         flatSection('routines', 'Routines', routines, { type: 'goto', icon: '→', title: 'Go to routine' });
         flatSection('moduleData', 'Module Data', moduleData);
         flatSection('globals', 'Global Data', globals);
@@ -165,7 +215,7 @@
             if (msg.type === 'setSymbols') {
                 document.getElementById('title').textContent = msg.title || 'Data';
                 var byName = function (a, b) { return (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()); };
-                locals = (msg.locals || []).slice().sort(byName);
+                locals = (msg.locals || []).slice(); // declaration order — matches Clarion's native Data pad; do NOT sort
                 routines = (msg.routines || []).slice().sort(byName);
                 moduleData = (msg.moduleData || []).slice().sort(byName);
                 globals = (msg.globals || []).slice().sort(byName);
