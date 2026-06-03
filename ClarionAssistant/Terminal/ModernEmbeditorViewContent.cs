@@ -307,6 +307,26 @@ namespace ClarionAssistant.Terminal
             return keys;
         }
 
+        // RelationDef list → JSON dicts for the Relations sub-folder. Each row is named by the related table;
+        // the "+" detail carries the relation type, primary/foreign keys, and the column mappings.
+        private static List<object> RelationsToDicts(ClarionAppDataReader.TableDef t)
+        {
+            var rels = new List<object>();
+            foreach (var r in t.Relations)
+            {
+                var maps = new List<object>();
+                foreach (var m in r.Mappings)
+                    maps.Add(new Dictionary<string, object> { { "from", m.From ?? "" }, { "to", m.To ?? "" } });
+                rels.Add(new Dictionary<string, object>
+                {
+                    { "name", r.Name ?? "" }, { "type", r.Type ?? "" },
+                    { "primaryKey", r.PrimaryKey ?? "" }, { "foreignKey", r.ForeignKey ?? "" },
+                    { "mappings", maps }
+                });
+            }
+            return rels;
+        }
+
         /// <summary>
         /// The procedure's "Other Files": the [FILES][OTHERS] names from the cached whole-app .txa, paired
         /// with their schema (columns w/ pictures + GROUP nesting, keys) from the dictionary .dcv export.
@@ -354,7 +374,7 @@ namespace ClarionAssistant.Terminal
                     {
                         { "name", t.Name }, { "prefix", t.Prefix },
                         { "attributes", BuildTableAttributes(t) }, { "description", t.Description ?? "" },
-                        { "columns", cols }, { "keys", KeysToDicts(t) }
+                        { "columns", cols }, { "keys", KeysToDicts(t) }, { "relations", RelationsToDicts(t) }
                     });
                 }
             }
@@ -445,7 +465,7 @@ namespace ClarionAssistant.Terminal
                 { "moduleData", moduleData },
                 { "globals", globals },
                 { "otherFiles", otherFiles },
-                { "tables", GetUsedTables() },
+                { "tables", GetDeclaredTables() },
                 { "procedures", procedures }
             };
             return data;
@@ -483,43 +503,42 @@ namespace ClarionAssistant.Terminal
             return false;
         }
 
-        private List<Dictionary<string, object>> GetUsedTables()
+        // "Declared Tables": the tables DECLARED in the generated <app>.clw File Declaration (the program's
+        // global file set). The SET comes from the <app>.clw (authoritative, stable, explainable — not a
+        // fuzzy text scan); the SCHEMA is enriched from the LIVE dictionary snapshot (pictures, GROUP
+        // nesting, full keys), matched by name, falling back to the <app>.clw-parsed schema when the live
+        // snapshot lacks an entry. A standalone whole-dictionary browser is a separate, future addin.
+        private List<Dictionary<string, object>> GetDeclaredTables()
         {
             var outp = new List<Dictionary<string, object>>();
             try
             {
                 string appClw = ClarionAppDataReader.FindAppClwPath();
-                if (appClw == null) return outp;
-                var tables = ClarionAppDataReader.ParseTables(appClw);
-                string src = _sourceText ?? "";
-                foreach (var t in tables)
+                var declared = appClw != null
+                    ? ClarionAppDataReader.ParseTables(appClw)
+                    : new List<ClarionAppDataReader.TableDef>();
+                if (declared.Count == 0) return outp;
+
+                Dictionary<string, ClarionAppDataReader.TableDef> live;
+                lock (_liveLock) { live = _liveTables; }
+
+                foreach (var d in declared)
                 {
-                    if (!IsTableUsed(t, src)) continue;
-                    var cols = new List<Dictionary<string, object>>();
-                    foreach (var f in t.Fields)
-                        cols.Add(new Dictionary<string, object> { { "name", f.Name }, { "type", f.Type } });
+                    ClarionAppDataReader.TableDef t = null;
+                    if (live != null && !string.IsNullOrEmpty(d.Name)) live.TryGetValue(d.Name, out t);
+                    if (t == null) t = d; // live snapshot not ready / no match — use the clw-parsed schema
+                    var cols = new List<object>();
+                    foreach (var f in t.Fields) cols.Add(ColToDict(f));
                     outp.Add(new Dictionary<string, object>
                     {
-                        { "name", t.Name }, { "prefix", t.Prefix }, { "columns", cols }, { "keys", t.Keys }
+                        { "name", t.Name }, { "prefix", t.Prefix },
+                        { "attributes", BuildTableAttributes(t) }, { "description", t.Description ?? "" },
+                        { "columns", cols }, { "keys", KeysToDicts(t) }, { "relations", RelationsToDicts(t) }
                     });
                 }
             }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernEmbeditor] GetUsedTables: " + ex.Message); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernEmbeditor] GetDeclaredTables: " + ex.Message); }
             return outp;
-        }
-
-        // A table is "used" by the procedure if its PRE: prefix or its name appears in the mirrored source.
-        private static bool IsTableUsed(ClarionAppDataReader.TableDef t, string src)
-        {
-            if (string.IsNullOrEmpty(src)) return false;
-            if (!string.IsNullOrEmpty(t.Prefix) && src.IndexOf(t.Prefix + ":", StringComparison.OrdinalIgnoreCase) >= 0)
-                return true;
-            if (!string.IsNullOrEmpty(t.Name) &&
-                System.Text.RegularExpressions.Regex.IsMatch(src,
-                    @"\b" + System.Text.RegularExpressions.Regex.Escape(t.Name) + @"\b",
-                    System.Text.RegularExpressions.RegexOptions.IgnoreCase))
-                return true;
-            return false;
         }
 
         /// <summary>Insert text at the editor's cursor (used by the Modern Data pad's double-click-insert).</summary>

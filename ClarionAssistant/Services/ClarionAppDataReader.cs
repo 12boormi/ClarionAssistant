@@ -39,6 +39,24 @@ namespace ClarionAssistant.Services
             public string Description;
         }
 
+        // A dictionary relationship to another table (populated by the live dictionary reader). Named by the
+        // RELATED table (matching Clarion's dict Relations view, which lists the other table per row).
+        public sealed class RelationDef
+        {
+            public string Name;                 // the related (other) table's name — the row label
+            public string Type;                 // "1:MANY" | "MANY:1" | "1:1"
+            public string PrimaryKey;           // the key on the primary (parent) side
+            public string ForeignKey;           // the key on the foreign (child) side
+            public readonly List<FieldMap> Mappings = new List<FieldMap>(); // column pairings
+        }
+
+        // One column pairing in a relationship: this table's field ↔ the related table's field.
+        public sealed class FieldMap
+        {
+            public string From;                 // a field on the row's table
+            public string To;                   // the paired field on the related table
+        }
+
         public sealed class TableDef
         {
             public string Name;
@@ -47,6 +65,7 @@ namespace ClarionAssistant.Services
             public readonly List<string> Keys = new List<string>();   // legacy name-only (clw/.dcv sources)
             // Rich attributes, populated by the live dictionary reader (ReadLiveDictionaryTables).
             public readonly List<KeyDef> KeyDefs = new List<KeyDef>();
+            public readonly List<RelationDef> Relations = new List<RelationDef>();
             public string Driver = "";
             public string DriverOptions = "";
             public string Owner = "";
@@ -71,29 +90,59 @@ namespace ClarionAssistant.Services
                 if (string.IsNullOrEmpty(baseName)) return null;
                 string clwName = baseName + ".clw";
 
-                // Primary: use the loaded .red redirection to find where generation puts the .clw
-                // (this is the same resolution used to feed the CodeGraph). Try the common config sections.
+                // Candidate paths in priority order. CAUTION: many apps GENERATE into a 'source\' (or other)
+                // subfolder while a STALE, EMPTY copy of <app>.clw sits next to the .app — so we must NOT just
+                // take the first that exists. We prefer a candidate that actually DECLARES FILEs (the real
+                // generated PROGRAM module), falling back to the first that exists for non-table callers.
+                var candidates = new List<string>();
                 var red = RedFileService.Active;
                 if (red != null)
                 {
-                    string viaRed = red.Resolve(clwName, "Debug", "Release", "Common")
-                                 ?? red.Resolve(clwName);
-                    if (!string.IsNullOrEmpty(viaRed) && File.Exists(viaRed)) return viaRed;
+                    string viaRed = red.Resolve(clwName, "Debug", "Release", "Common") ?? red.Resolve(clwName);
+                    if (!string.IsNullOrEmpty(viaRed)) candidates.Add(viaRed);
                 }
-
-                // Fallback: same directory as the .app.
                 if (!string.IsNullOrEmpty(dir))
                 {
-                    string candidate = Path.Combine(dir, clwName);
-                    if (File.Exists(candidate)) return candidate;
-                    foreach (var f in Directory.GetFiles(dir, "*.clw"))
-                        if (string.Equals(Path.GetFileNameWithoutExtension(f), baseName, StringComparison.OrdinalIgnoreCase))
-                            return f;
+                    candidates.Add(Path.Combine(dir, "source", clwName)); // common generation subfolder
+                    candidates.Add(Path.Combine(dir, clwName));           // next to the .app (often stale)
+                    try
+                    {
+                        // any <base>.clw one level down (gen\/obj\/source\ variants), then any in the app dir
+                        foreach (var sub in Directory.GetDirectories(dir))
+                            candidates.Add(Path.Combine(sub, clwName));
+                        foreach (var f in Directory.GetFiles(dir, "*.clw"))
+                            if (string.Equals(Path.GetFileNameWithoutExtension(f), baseName, StringComparison.OrdinalIgnoreCase))
+                                candidates.Add(f);
+                    }
+                    catch { }
                 }
 
-                return null;
+                string firstExisting = null;
+                foreach (var c in candidates)
+                {
+                    if (string.IsNullOrEmpty(c) || !File.Exists(c)) continue;
+                    if (firstExisting == null) firstExisting = c;
+                    if (ClwHasFileDeclarations(c)) return c; // the real generated module
+                }
+                return firstExisting;
             }
             catch { return null; }
+        }
+
+        // Cheap probe: does this .clw declare any FILEs (a real generated PROGRAM module) vs a stale/empty
+        // stub? Looks for a "&lt;label&gt;  FILE[,/space]" line. Stops at the first hit.
+        private static bool ClwHasFileDeclarations(string clwPath)
+        {
+            try
+            {
+                foreach (var raw in File.ReadLines(clwPath))
+                {
+                    string l = StripComment(raw);
+                    if (Regex.IsMatch(l, @"^\s*\S+\s+FILE\b", RegexOptions.IgnoreCase)) return true;
+                }
+            }
+            catch { }
+            return false;
         }
 
         /// <summary>

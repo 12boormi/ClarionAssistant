@@ -56,6 +56,11 @@ namespace ClarionAssistant
                 settings.AreBrowserAcceleratorKeysEnabled = false;
 
                 _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
+
+                // Restore the ctrl-mousewheel font zoom (WebView2's built-in ZoomFactor) and keep it saved.
+                _webView.ZoomFactor = Terminal.WebViewZoomHelper.GetZoom("modernDataPad");
+                _webView.ZoomFactorChanged += (s2, e2) => Terminal.WebViewZoomHelper.SetZoom("modernDataPad", _webView.ZoomFactor);
+
                 StartAutoRefreshTimer();
 
                 string htmlPath = GetHtmlPath();
@@ -75,7 +80,17 @@ namespace ClarionAssistant
             {
                 string json = e.TryGetWebMessageAsString();
                 string action = ExtractJsonValue(json, "action");
-                if (action == "ready") { _isInitialized = true; Refresh(); }
+                if (action == "ready")
+                {
+                    _isInitialized = true;
+                    PostRestoreUiState(); // send saved collapse/expand state BEFORE the first data render
+                    Refresh();
+                }
+                else if (action == "saveUiState")
+                {
+                    // Opaque JSON blob owned by the pad's JS (sectionCollapsed/localCollapsed/relExpanded/detailOpen).
+                    Terminal.ModernDataPadState.Save(ExtractJsonValue(json, "state"));
+                }
                 else if (action == "refresh")
                 {
                     // Explicit Refresh re-exports the whole-app .txa FIRST (UI thread, silent) so it picks up
@@ -164,6 +179,16 @@ namespace ClarionAssistant
             });
         }
 
+        /// <summary>Send the persisted collapse/expand UI state to the pad so it can restore before first render.</summary>
+        private void PostRestoreUiState()
+        {
+            string state = Terminal.ModernDataPadState.Load();
+            if (string.IsNullOrEmpty(state)) return;
+            // Pass the saved blob through as a STRING value (the JS JSON.parses it). Keeping it opaque means
+            // the host never has to understand the state shape.
+            Post(new Dictionary<string, object> { { "type", "restoreUiState" }, { "state", state } });
+        }
+
         private void Post(Dictionary<string, object> data)
         {
             Action post = () =>
@@ -172,7 +197,7 @@ namespace ClarionAssistant
                 try
                 {
                     var ser = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
-                    data["type"] = "setSymbols";
+                    if (!data.ContainsKey("type")) data["type"] = "setSymbols"; // default; restoreUiState sets its own
                     _webView.CoreWebView2.PostWebMessageAsJson(ser.Serialize(data));
                 }
                 catch { }

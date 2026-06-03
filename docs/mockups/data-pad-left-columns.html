@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Modern Data pad — column alignment mockup</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { font-family: 'Segoe UI', Tahoma, sans-serif; font-size: 12px;
+        background: #d8dde3; color: #1f1f1f; padding: 18px; }
+    h1 { font-size: 15px; margin-bottom: 4px; }
+    .sub { color: #555; margin-bottom: 16px; font-size: 12px; }
+    .panes { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
+    .pane { background: #ffffff; border: 1px solid #c4cad1; border-radius: 6px; width: 360px;
+        box-shadow: 0 1px 3px rgba(0,0,0,.12); overflow: hidden; }
+    .pane h2 { font-size: 12px; font-weight: 700; padding: 8px 10px; background: #eef1f4;
+        border-bottom: 1px solid #d4d4d4; }
+    .pane h2 small { font-weight: 400; color: #777; }
+    .section { font-weight: 600; color: #3a3a3a; background: #eef1f4; padding: 4px 10px;
+        border-top: 1px solid #d4d4d4; border-bottom: 1px solid #d4d4d4; }
+
+    /* ---------- CURRENT: flex, type/picture pushed RIGHT ---------- */
+    .cur .row { display: flex; align-items: center; gap: 8px; padding: 3px 10px; }
+    .cur .row:hover { background: #e8eef7; }
+    .cur .tw { color: #555; min-width: 12px; display: inline-block; text-align: center; }
+    .cur .name { color: #1f1f1f; }
+    .cur .type { font-size: 10px; color: #5a5a5a; margin-left: auto; }
+    .cur .pic  { font-size: 10px; color: #0a7d3a; font-family: Consolas,'Courier New',monospace;
+        min-width: 40px; text-align: right; }
+
+    /* ---------- PROPOSED: grid, type/picture LEFT-aligned columns ---------- */
+    .prop .grid { display: grid; grid-template-columns: max-content max-content max-content;
+        column-gap: 22px; align-items: center; padding: 4px 10px 8px; }
+    .prop .cell { padding: 3px 0; }
+    .prop .name { color: #1f1f1f; white-space: nowrap; }
+    .prop .name .tw { color: #555; min-width: 14px; display: inline-block; text-align: center; }
+    .prop .name.indent { padding-left: 18px; }
+    .prop .type { font-size: 10px; color: #5a5a5a; white-space: nowrap; }
+    .prop .pic  { font-size: 10px; color: #0a7d3a; font-family: Consolas,'Courier New',monospace; white-space: nowrap; }
+    .prop .grid > .cell:hover { background: #e8eef7; }
+
+    .note { margin-top: 18px; font-size: 12px; color: #444; max-width: 760px; line-height: 1.5; }
+    .note code { background: #eef1f4; padding: 0 4px; border-radius: 3px; font-family: Consolas, monospace; }
+</style>
+</head>
+<body>
+    <h1>Modern Data pad — type &amp; picture column alignment</h1>
+    <div class="sub">Same sample (Local Data). Left = current (right-aligned). Right = proposed (left-aligned columns).</div>
+
+    <div class="panes">
+        <!-- CURRENT -->
+        <div class="pane cur">
+            <h2>Current <small>— right-aligned</small></h2>
+            <div class="section">▾ Local Data (37)</div>
+            <div class="row"><span class="tw"></span><span class="name">ls_Path</span><span class="type">CSTRING(120)</span><span class="pic">@s119</span></div>
+            <div class="row"><span class="tw">▾</span><span class="name">lq_ClassPaths</span><span class="type">QUEUE,PRE()</span><span class="pic">@s20</span></div>
+            <div class="row" style="padding-left:28px"><span class="tw"></span><span class="name">lqc_ClassPathName</span><span class="type">STRING(200)</span><span class="pic">@s200</span></div>
+            <div class="row"><span class="tw"></span><span class="name">ll_Count</span><span class="type">LONG</span><span class="pic">@n-14</span></div>
+            <div class="row"><span class="tw"></span><span class="name">ls_ClassFilter</span><span class="type">STRING(120)</span><span class="pic">@s120</span></div>
+            <div class="row"><span class="tw"></span><span class="name">ll_Counter</span><span class="type">LONG</span><span class="pic">@n-14</span></div>
+        </div>
+
+        <!-- PROPOSED -->
+        <div class="pane prop">
+            <h2>Proposed <small>— left-aligned columns</small></h2>
+            <div class="section">▾ Local Data (37)</div>
+            <div class="grid">
+                <div class="cell name"><span class="tw"></span>ls_Path</div>            <div class="cell type">CSTRING(120)</div><div class="cell pic">@s119</div>
+                <div class="cell name"><span class="tw">▾</span>lq_ClassPaths</div>      <div class="cell type">QUEUE,PRE()</div> <div class="cell pic">@s20</div>
+                <div class="cell name indent">lqc_ClassPathName</div>                   <div class="cell type">STRING(200)</div> <div class="cell pic">@s200</div>
+                <div class="cell name"><span class="tw"></span>ll_Count</div>           <div class="cell type">LONG</div>        <div class="cell pic">@n-14</div>
+                <div class="cell name"><span class="tw"></span>ls_ClassFilter</div>     <div class="cell type">STRING(120)</div> <div class="cell pic">@s120</div>
+                <div class="cell name"><span class="tw"></span>ll_Counter</div>         <div class="cell type">LONG</div>        <div class="cell pic">@n-14</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="note">
+        In the <b>proposed</b> layout the <code>type</code> column starts just past the longest name and the
+        <code>picture</code> column starts just past the longest type — both left-aligned, so each column lines
+        up vertically under its longest entry. Column widths auto-size to content (CSS grid
+        <code>max-content</code>), and nesting indent is absorbed by the name column without shifting the
+        type/picture columns. Gap between columns is tunable (currently 22px).
+    </div>
+</body>
+</html>

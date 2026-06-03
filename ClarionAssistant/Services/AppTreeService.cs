@@ -1651,6 +1651,7 @@ namespace ClarionAssistant.Services
                         foreach (var f in flds) td.Fields.Add(ReadLiveField(f));
                     if (GetProp(t, "Keys") is System.Collections.IEnumerable keys)
                         foreach (var k in keys) td.KeyDefs.Add(ReadLiveKey(k));
+                    ReadLiveRelations(t, td);
                     outp.Add(td);
                 }
             }
@@ -1726,6 +1727,68 @@ namespace ClarionAssistant.Services
                     if (fld != null) kd.Components.Add(ReadLiveField(fld));
                 }
             return kd;
+        }
+
+        // Read a table's relationships from the live dictionary (DDFile.Relations → DDRelation). A DDRelation
+        // links a parent (primary-key) table to a child (foreign-key) table; cardinality is inherently
+        // parent(1)→child(MANY). We present each from THIS table's perspective: the row is named by the
+        // OTHER table, the type is "1:MANY" when this table is the parent (the "1") else "MANY:1", and the
+        // mappings list the column pairings on this side. Member names confirmed via dump_object_api — note
+        // SoftVelocity's "Foreing" misspelling on the foreign-key labels. MANAGED reflection only; UI thread.
+        private void ReadLiveRelations(object tobj, ClarionAppDataReader.TableDef td)
+        {
+            try
+            {
+                if (!(GetProp(tobj, "Relations") is System.Collections.IEnumerable rels)) return;
+                string thisName = td.Name ?? "";
+                foreach (var r in rels)
+                {
+                    if (r == null) continue;
+                    string parentTable = (GetProp(r, "PrimaryKeyTableLabel") ?? "").ToString();
+                    string childTable  = (GetProp(r, "ForeingKeyTableLabel") ?? "").ToString();
+                    string primaryKey  = (GetProp(r, "PrimaryKeyLabel") ?? "").ToString();
+                    string foreignKey  = (GetProp(r, "ForeingKeyLabel") ?? "").ToString();
+
+                    bool thisIsParent = string.Equals(parentTable, thisName, StringComparison.OrdinalIgnoreCase);
+                    string related = thisIsParent ? childTable : parentTable;
+                    if (string.IsNullOrEmpty(related))
+                        related = string.Equals(childTable, thisName, StringComparison.OrdinalIgnoreCase)
+                                  ? parentTable : childTable;
+
+                    var rd = new ClarionAppDataReader.RelationDef
+                    {
+                        Name = related,
+                        Type = thisIsParent ? "1:MANY" : "MANY:1",
+                        PrimaryKey = primaryKey,
+                        ForeignKey = foreignKey
+                    };
+
+                    // Column pairings on THIS table's side. Each DDRelationMapping pairs its own .Field with
+                    // the .KeyComponent's .Field (the key column on the other table). Prefixed names disambiguate
+                    // which table each field belongs to.
+                    var maps = GetProp(r, thisIsParent ? "ParentMappings" : "ChildMappings")
+                               as System.Collections.IEnumerable;
+                    if (maps != null)
+                        foreach (var m in maps)
+                        {
+                            string fromField = PrefixedFieldName(GetProp(m, "Field"));
+                            string toField = PrefixedFieldName(GetProp(GetProp(m, "KeyComponent"), "Field"));
+                            if (!string.IsNullOrEmpty(fromField) || !string.IsNullOrEmpty(toField))
+                                rd.Mappings.Add(new ClarionAppDataReader.FieldMap { From = fromField, To = toField });
+                        }
+
+                    td.Relations.Add(rd);
+                }
+            }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[AppTree] ReadLiveRelations: " + ex.Message); }
+        }
+
+        // A DDField's PREFIXED name ("Add:AddressID"). For relation mappings the two fields live on DIFFERENT
+        // tables, so the prefix is what tells them apart — prefer it over the bare Label.
+        private string PrefixedFieldName(object fobj)
+        {
+            if (fobj == null) return "";
+            return (GetProp(fobj, "Name") ?? GetProp(fobj, "Label") ?? "").ToString();
         }
 
         // Dictionary OWNER stores "!Glo:Connection" (leading ! = variable, not literal); strip it for display.
