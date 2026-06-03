@@ -147,25 +147,26 @@
             });
         }
 
-        // ----- Local Data: declaration order, QUEUE/GROUP expandable to nested members -----
-        (function () {
-            var anyMatch = function (items) {
-                return (items || []).some(function (it) { return match(it.name) || anyMatch(it.children); });
+        // ----- Tree scope: declaration order, QUEUE/GROUP expandable to nested members, picture column.
+        //       Used by both Local Data and Global Data (the .txa gives both the same shape). -----
+        function treeSection(key, label, items) {
+            var anyMatch = function (arr) {
+                return (arr || []).some(function (it) { return match(it.name) || anyMatch(it.children); });
             };
-            var countAll = function (items) {
-                return (items || []).reduce(function (n, it) { return n + 1 + countAll(it.children); }, 0);
+            var countAll = function (arr) {
+                return (arr || []).reduce(function (n, it) { return n + 1 + countAll(it.children); }, 0);
             };
-            var shown = locals.filter(function (it) { return match(it.name) || anyMatch(it.children); });
+            var shown = items.filter(function (it) { return match(it.name) || anyMatch(it.children); });
             if (!shown.length) return;
-            if (!sectionHeader('locals', 'Local Data', countAll(locals))) return;
+            if (!sectionHeader(key, label, countAll(items))) return;
 
-            var walk = function (items, depth, parentKey) {
-                items.forEach(function (it) {
+            var walk = function (arr, depth, parentKey) {
+                arr.forEach(function (it) {
                     var kids = it.children || [];
                     if (!match(it.name) && !anyMatch(kids)) return;
-                    var key = parentKey + '/' + (it.name || '');
+                    var nkey = parentKey + '/' + (it.name || '');
                     var hasKids = kids.length > 0;
-                    var open = hasKids && (!localCollapsed[key] || !!f);
+                    var open = hasKids && (!localCollapsed[nkey] || !!f);
                     var tip = it.name + (it.type ? '  ' + it.type : '')
                         + (it.picture ? '  ' + it.picture : '')
                         + (it.prompt ? '\nPrompt: ' + it.prompt : '')
@@ -185,19 +186,21 @@
                     if (hasKids) {
                         row.addEventListener('click', function (e) {
                             if (e.detail > 1) return; // ignore the click half of a double-click
-                            localCollapsed[key] = !localCollapsed[key]; render();
+                            localCollapsed[nkey] = !localCollapsed[nkey]; render();
                         });
                     }
                     list.appendChild(row);
-                    if (open) walk(kids, depth + 1, key);
+                    if (open) walk(kids, depth + 1, nkey);
                 });
             };
-            walk(locals, 0, '');
-        })();
+            walk(items, 0, key);
+        }
+
+        treeSection('locals', 'Local Data', locals);
 
         flatSection('routines', 'Routines', routines, { type: 'goto', icon: '→', title: 'Go to routine' });
         flatSection('moduleData', 'Module Data', moduleData);
-        flatSection('globals', 'Global Data', globals);
+        treeSection('globals', 'Global Data', globals);
         flatSection('procedures', 'Procedures', procedures, { type: 'open', icon: '↗', title: 'Open in Modern Embeditor' });
 
         if (!list.childNodes.length) {
@@ -218,7 +221,7 @@
                 locals = (msg.locals || []).slice(); // declaration order — matches Clarion's native Data pad; do NOT sort
                 routines = (msg.routines || []).slice().sort(byName);
                 moduleData = (msg.moduleData || []).slice().sort(byName);
-                globals = (msg.globals || []).slice().sort(byName);
+                globals = (msg.globals || []).slice(); // declaration order from the .txa [PROGRAM][DATA]; do NOT sort
                 procedures = (msg.procedures || []).slice().sort(byName);
                 tables = (msg.tables || []).slice().sort(byName);
                 tables.forEach(function (t) { if (t.columns) t.columns = t.columns.slice().sort(byName); });

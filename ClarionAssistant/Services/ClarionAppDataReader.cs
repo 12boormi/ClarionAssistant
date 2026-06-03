@@ -296,11 +296,10 @@ namespace ClarionAssistant.Services
         /// </summary>
         public static List<FieldDef> ParseTxaProcedureData(string txaText, string procName)
         {
-            var outp = new List<FieldDef>();
-            if (string.IsNullOrEmpty(txaText) || string.IsNullOrEmpty(procName)) return outp;
+            if (string.IsNullOrEmpty(txaText) || string.IsNullOrEmpty(procName)) return new List<FieldDef>();
             var lines = txaText.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
 
-            // 1) Locate [DATA] inside the [PROCEDURE] block whose NAME matches procName.
+            // Locate [DATA] inside the [PROCEDURE] block whose NAME matches procName.
             int dataStart = -1;
             for (int i = 0; i < lines.Length && dataStart < 0; i++)
             {
@@ -323,10 +322,49 @@ namespace ClarionAssistant.Services
                     if (t == "[PROCEDURE]") break; // block has no [DATA]
                 }
             }
-            if (dataStart < 0) return outp;
+            return dataStart < 0 ? new List<FieldDef>() : ParseTxaDataRegion(lines, dataStart);
+        }
 
-            // 2) Walk the data region. stack[top] = the FieldDef list the current scope appends to.
-            var stack = new List<List<FieldDef>> { outp };
+        /// <summary>
+        /// Global Data from the whole-app TXA: the [PROGRAM] block's [DATA] section — the DEVELOPER-registered
+        /// globals ONLY (e.g. a SETUP GROUP with members + pictures), matching Clarion's native Global Data
+        /// pad. This deliberately EXCLUDES the ABC-template-generated framework globals (Dictionary,
+        /// GlobalErrors, INIMgr, UD, GlobalRequest/Response…) that the generated &lt;app&gt;.clw ParseGlobalData
+        /// surfaces — Clarion's pad shows only what the developer added. Same nesting + PICTURE/PROMPT/HEADER
+        /// as the procedure [DATA].
+        /// </summary>
+        public static List<FieldDef> ParseTxaGlobalData(string txaText)
+        {
+            if (string.IsNullOrEmpty(txaText)) return new List<FieldDef>();
+            var lines = txaText.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+
+            // Locate the [PROGRAM] block, then its [DATA] (stop if we hit [MODULE]/[PROCEDURE]/[EMBED] first).
+            int dataStart = -1;
+            for (int i = 0; i < lines.Length && dataStart < 0; i++)
+            {
+                if (lines[i].Trim() != "[PROGRAM]") continue;
+                for (int k = i + 1; k < lines.Length; k++)
+                {
+                    string t = lines[k].Trim();
+                    if (t == "[DATA]") { dataStart = k + 1; break; }
+                    if (t == "[MODULE]" || t == "[PROCEDURE]" || t == "[EMBED]") break;
+                }
+            }
+            return dataStart < 0 ? new List<FieldDef>() : ParseTxaDataRegion(lines, dataStart);
+        }
+
+        /// <summary>
+        /// Walk a TXA [DATA] region (procedure-local OR program-global) starting at dataStart. Skips the
+        /// [SCREENCONTROLS]/[REPORTCONTROLS] sub-sections and "! …" rep lines, reads "label  TYPE" decls,
+        /// attaches the immediately-following "!!> …" PICTURE/PROMPT/HEADER, and nests QUEUE/GROUP (members
+        /// become Children) closed by an indented bare END. Stops at the next non-control "[…]" header.
+        /// </summary>
+        private static List<FieldDef> ParseTxaDataRegion(string[] lines, int dataStart)
+        {
+            var outp = new List<FieldDef>();
+            // Each scope carries its append-list AND the QUEUE/GROUP PRE() prefix to apply to its direct
+            // members, so a GROUP,PRE(SET) shows its fields as SET:Member (matching Clarion's Data pad).
+            var stack = new List<(List<FieldDef> children, string pre)> { (outp, "") };
             FieldDef lastDecl = null;
 
             for (int i = dataStart; i < lines.Length; i++)
@@ -368,16 +406,19 @@ namespace ClarionAssistant.Services
 
                 if (rest.Length == 0) continue; // no type → not a data declaration
 
-                var node = new FieldDef { Name = label, Type = rest };
-                stack[stack.Count - 1].Add(node);
+                var top = stack[stack.Count - 1];
+                string display = string.IsNullOrEmpty(top.pre) ? label : top.pre + ":" + label;
+                var node = new FieldDef { Name = display, Type = rest };
+                top.children.Add(node);
                 lastDecl = node;
 
-                // QUEUE/GROUP opens a nested scope; its own metadata is on the following !!> line.
+                // QUEUE/GROUP opens a nested scope; members get its PRE() prefix. Its own metadata is on
+                // the following !!> line.
                 string restU = rest.ToUpperInvariant();
                 if (restU.StartsWith("QUEUE") || restU.StartsWith("GROUP"))
                 {
                     node.Children = new List<FieldDef>();
-                    stack.Add(node.Children);
+                    stack.Add((node.Children, ExtractPre(rest)));
                 }
             }
             return outp;

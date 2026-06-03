@@ -210,10 +210,24 @@ namespace ClarionAssistant.Terminal
                 foreach (var r in ClarionAppDataReader.ParseRoutines(_sourceText, _procedureName))
                     routines.Add(new Dictionary<string, object> { { "name", r }, { "type", "ROUTINE" } });
 
-                string appClw = ClarionAppDataReader.FindAppClwPath();
-                if (appClw != null)
-                    foreach (var g in ClarionAppDataReader.ParseGlobalData(appClw))
-                        globals.Add(new Dictionary<string, object> { { "name", g.Name }, { "type", g.Type } });
+                // Global Data: prefer the .txa [PROGRAM][DATA] — the developer-registered globals ONLY
+                // (nested + pictures, matching Clarion's pad). When the .txa is cached it's authoritative
+                // even if empty (an app with no dev globals shows none). Fall back to the generated
+                // <app>.clw globals only when no .txa is available yet.
+                List<ClarionAppDataReader.FieldDef> globalDefs;
+                if (!string.IsNullOrEmpty(txa))
+                {
+                    globalDefs = ClarionAppDataReader.ParseTxaGlobalData(txa);
+                }
+                else
+                {
+                    string appClw = ClarionAppDataReader.FindAppClwPath();
+                    globalDefs = appClw != null
+                        ? ClarionAppDataReader.ParseGlobalData(appClw)
+                        : new List<ClarionAppDataReader.FieldDef>();
+                }
+                foreach (var g in globalDefs)
+                    globals.Add(FieldToDict(g));
             }
             catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernEmbeditor] GetPadData parse: " + ex.Message); }
 
