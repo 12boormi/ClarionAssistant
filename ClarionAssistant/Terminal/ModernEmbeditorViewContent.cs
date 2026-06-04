@@ -731,10 +731,27 @@ namespace ClarionAssistant.Terminal
         /// <summary>Re-select this view's tab (the save round-trip activates the app tree to drive the embeditor).</summary>
         private void BringToFront()
         {
+            // DEFER the re-select onto a clean, non-reentrant turn. The save round-trip just pumped DoEvents inside
+            // the native TryClose; re-activating this (WebView2) tab synchronously on that same stack risks the very
+            // focus deadlock we're fixing on the close side. Post it (same primitive HandleSave uses) so it runs
+            // after the close stack fully unwinds. Re-ACTIVATING an existing WebView2 tab on a settled turn is safe
+            // — only CREATING / manual SetFocus on a reentrant stack deadlocks. Use SelectWindow (the SharpDevelop
+            // view activation), NOT a WebView2-specific focus call.
             try
             {
-                var w = WorkbenchWindow;
-                if (w != null) w.GetType().GetMethod("SelectWindow", Type.EmptyTypes)?.Invoke(w, null);
+                Action select = () =>
+                {
+                    try
+                    {
+                        var w = WorkbenchWindow;
+                        if (w != null) w.GetType().GetMethod("SelectWindow", Type.EmptyTypes)?.Invoke(w, null);
+                    }
+                    catch { }
+                };
+                if (_panel != null && _panel.IsHandleCreated)
+                    _panel.BeginInvoke(select);
+                else
+                    select();
             }
             catch { }
         }

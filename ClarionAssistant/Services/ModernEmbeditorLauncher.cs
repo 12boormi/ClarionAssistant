@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 using ICSharpCode.SharpDevelop.Gui;
@@ -148,6 +151,141 @@ namespace ClarionAssistant.Services
         }
         internal static void EnterBusy() { System.Threading.Interlocked.Increment(ref _busyCount); }
         internal static void LeaveBusy() { System.Threading.Interlocked.Decrement(ref _busyCount); }
+
+        // TEMP diagnostic: start a background (threadpool) watchdog that logs elapsed time every ~500ms while a
+        // potentially-blocking UI-thread native call runs. Because the timer fires on a threadpool thread it keeps
+        // logging EVEN IF the UI thread is hard-frozen, so a hang gets timestamped (we see how long it ran before
+        // the IDE was killed) instead of the log just dying. Dispose the returned token when the call returns.
+        internal static IDisposable StartWatchdog(string label)
+        {
+            return new Watchdog(label);
+        }
+
+        private sealed class Watchdog : IDisposable
+        {
+            private readonly string _label;
+            private readonly System.Diagnostics.Stopwatch _sw;
+            private System.Threading.Timer _timer;
+            private volatile bool _disposed;
+            private bool _noModalNoteLogged;
+            private readonly HashSet<long> _seenModals = new HashSet<long>();
+            public Watchdog(string label)
+            {
+                _label = label;
+                _sw = System.Diagnostics.Stopwatch.StartNew();
+                TimingMark("      [watchdog] " + _label + " START");
+                _timer = new System.Threading.Timer(_ =>
+                {
+                    // Timer.Dispose() doesn't cancel an already-queued threadpool callback; this guard suppresses
+                    // a stray "still running" line that would otherwise print after "DONE".
+                    if (_disposed) return;
+                    try
+                    {
+                        long ms = _sw.ElapsedMilliseconds;
+                        TimingMark("      [watchdog] " + _label + " still running at +" + ms + " ms (UI thread may be blocked)");
+                        // DECISIVE DIAGNOSTIC: once a hang exceeds ~2s, scan THIS process's top-level windows for a
+                        // modal dialog (#32770). Runs on the threadpool thread so it survives a frozen UI. A #32770
+                        // present during a TryClose hang => a hidden "Save changes?" modal stuck behind the WebView2
+                        // tab (the dirty-flag mechanism); none => a pure WebView2 focus/activation deadlock.
+                        if (ms >= 2000) ScanForModal();
+                    }
+                    catch { }
+                }, null, 500, 500);
+            }
+
+            private void ScanForModal()
+            {
+                bool foundAny = false;
+                try
+                {
+                    uint myPid = GetCurrentProcessId();
+                    EnumWindows((h, l) =>
+                    {
+                        try
+                        {
+                            uint wpid; GetWindowThreadProcessId(h, out wpid);
+                            if (wpid != myPid) return true;
+                            if (!IsWindowVisible(h)) return true;
+                            var cls = new StringBuilder(64);
+                            GetClassName(h, cls, cls.Capacity);            // safe: no inter-thread message
+                            if (cls.ToString() == "#32770")                // standard Win32 dialog class
+                            {
+                                foundAny = true;
+                                long key = h.ToInt64();
+                                if (_seenModals.Add(key))
+                                {
+                                    var title = new StringBuilder(200);
+                                    GetWindowText(h, title, title.Capacity); // safe: a modal pumps its own loop
+                                    TimingMark("      [watchdog] !! MODAL #32770 hwnd=" + key.ToString("X") +
+                                        " title='" + title + "' during '" + _label + "' hang => hidden-dialog cause CONFIRMED");
+                                }
+                            }
+                        }
+                        catch { }
+                        return true;
+                    }, IntPtr.Zero);
+                }
+                catch { }
+                if (!foundAny && !_noModalNoteLogged)
+                {
+                    _noModalNoteLogged = true;
+                    TimingMark("      [watchdog] no #32770 modal in process at +" + _sw.ElapsedMilliseconds +
+                        "ms during '" + _label + "' hang => pure focus/activation (e.g. WebView2) suspected; keep scanning");
+                }
+            }
+
+            public void Dispose()
+            {
+                _disposed = true;
+                try { _timer?.Dispose(); } catch { }
+                _timer = null;
+                _sw.Stop();
+                TimingMark("      [watchdog] " + _label + " DONE at +" + _sw.ElapsedMilliseconds + " ms");
+            }
+
+            // P/Invokes for the modal scan. GetClassName / GetWindowThreadProcessId / IsWindowVisible never send an
+            // inter-thread message, so they're safe to call from this threadpool thread even while the UI is frozen;
+            // GetWindowText is only invoked on a #32770 (a modal that pumps its own loop), so it won't block.
+            [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+            [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+            [DllImport("user32.dll", CharSet = CharSet.Auto)] private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+            [DllImport("user32.dll", CharSet = CharSet.Auto)] private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+            [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
+            [DllImport("kernel32.dll")] private static extern uint GetCurrentProcessId();
+            private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+        }
+
+        // TEMP diagnostic: one-time dump of an object's save/close-related public+nonpublic instance methods to the
+        // timing log, so we can confirm what persist/close primitives the live ClaGenEditor actually exposes (and
+        // their exact parameter signatures) instead of guessing reflection names.
+        private static bool _methodsDumped;
+        internal static void DumpSaveCloseMethods(object editor)
+        {
+            if (editor == null || _methodsDumped) return;
+            _methodsDumped = true;
+            try
+            {
+                var t = editor.GetType();
+                TimingMark("      [api] editor type = " + t.FullName);
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;
+                foreach (var m in t.GetMethods(flags))
+                {
+                    var n = m.Name;
+                    if (n.IndexOf("save", StringComparison.OrdinalIgnoreCase) < 0 &&
+                        n.IndexOf("close", StringComparison.OrdinalIgnoreCase) < 0 &&
+                        n.IndexOf("exit", StringComparison.OrdinalIgnoreCase) < 0 &&
+                        n.IndexOf("discard", StringComparison.OrdinalIgnoreCase) < 0 &&
+                        n.IndexOf("apply", StringComparison.OrdinalIgnoreCase) < 0 &&
+                        n.IndexOf("commit", StringComparison.OrdinalIgnoreCase) < 0)
+                        continue;
+                    var ps = string.Join(", ", m.GetParameters().Select(p => p.ParameterType.Name + " " + p.Name));
+                    TimingMark("      [api] " + m.DeclaringType.Name + "." + n + "(" + ps + ") : " + m.ReturnType.Name);
+                }
+            }
+            catch (Exception ex) { TimingMark("      [api] dump failed: " + ex.Message); }
+        }
 
         internal static bool OpenAndMirror(AppTreeService appTree, string procName,
             out string source, out List<int[]> ranges, out string error)

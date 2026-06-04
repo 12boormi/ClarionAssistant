@@ -110,10 +110,18 @@ namespace ClarionAssistant.Services
                 ModernEmbeditorLauncher.TimingMark("  Saver: SaveAndCloseEmbeditor()");
                 string saveRes = appTree.SaveAndCloseEmbeditor();
                 ModernEmbeditorLauncher.TimingMark("  Saver: SaveAndCloseEmbeditor returned '" + saveRes + "' -> wait closed");
-                ModernEmbeditorLauncher.WaitForEmbedClosed(appTree, 3000);
-                ModernEmbeditorLauncher.TimingMark("  Saver: closed");
+                // Surface a save/close failure BEFORE waiting on the close — SaveAndCloseEmbeditor returns an
+                // "Error"-prefixed string for every failure mode (unconfirmed persist, TryClose==false, throw).
                 if (saveRes != null && saveRes.StartsWith("Error", StringComparison.OrdinalIgnoreCase))
                     return "Save error: " + saveRes;
+
+                // Confirm the native embeditor actually closed. If it didn't, the single-editor invariant is
+                // broken (next open/save fails) — treat it as an error rather than reporting a phantom success.
+                bool embedClosed = ModernEmbeditorLauncher.WaitForEmbedClosed(appTree, 3000);
+                ModernEmbeditorLauncher.TimingMark("  Saver: closed=" + embedClosed);
+                if (!embedClosed)
+                    return "Save error: '" + procName + "' was written but the embeditor did not confirm closed — " +
+                           "close it in the IDE before saving again.";
 
                 ok = true;
                 return "Saved " + changed.Count + " embed slot(s) to '" + procName + "'.";
