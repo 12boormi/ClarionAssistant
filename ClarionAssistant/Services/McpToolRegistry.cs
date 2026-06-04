@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.SQLite;
@@ -1877,8 +1877,9 @@ COMMON QUERIES:
                     if (string.IsNullOrEmpty(wsPath) || !Directory.Exists(wsPath))
                         return "Error: workspace_path required (directory containing .sln)";
 
+                    // Resolve up front for a precise error if nothing is installed.
                     string resolveSource;
-                    string serverJs = ResolveLspServerPath(out resolveSource);
+                    string serverJs = LspService.ResolveServerPath(out resolveSource);
                     if (serverJs == null)
                     {
                         // resolveSource may contain a descriptive error from the VS Code scan
@@ -1889,17 +1890,15 @@ COMMON QUERIES:
                             + "the 'Lsp.ServerPath' setting to the full path." + extra;
                     }
 
-                    if (_lspClient != null) _lspClient.Dispose();
-                    _lspClient = new LspClient();
+                    // Delegate to the single owner — no second construct site / start race.
+                    LspService.EnsureRunning();
+                    _lspClient = LspClient.Active;
 
-                    string wsUri = "file:///" + wsPath.Replace("\\", "/");
-                    string wsName = Path.GetFileName(wsPath);
-
-                    bool ok = _lspClient.Start(serverJs, wsUri, wsName);
-                    if (ok)
+                    if (_lspClient != null && _lspClient.IsRunning)
                         return "LSP server started for workspace: " + wsPath + "\n  Source: " + resolveSource + "\n  Server: " + serverJs;
 
                     // Provide diagnostic info on failure
+                    string wsUri = "file:///" + wsPath.Replace("\\", "/");
                     string lspRoot = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(serverJs), "..", "..", ".."));
                     string nodeExe = Path.Combine(lspRoot, "node.exe");
                     string diag = "Error: LSP server failed to start.\n"
@@ -3726,338 +3725,24 @@ Rebuilds both the bundled and the personal DocGraph DBs when both exist.",
         }
 
         /// <summary>
-        /// Resolves the LSP server.js path. Priority:
-        /// 1. Settings key "Lsp.ServerPath" (manual override — always wins)
-        /// 2. Bundled server relative to assembly: {assemblyDir}\lsp-server\out\server\src\server.js.
-        ///    PREFERRED: it ships with the addin (deploy.ps1) and is version-locked to the
-        ///    addin's features (e.g. textDocument/completion), so it must win over an
-        ///    externally-installed VS Code extension that can lag behind and 404 newer methods.
-        /// 3. Clarion VS Code extension install (Stable/Insiders/custom roots, excluding
-        ///    tombstoned extensions, highest stable SemVer) — fallback when no bundled server.
-        /// 4. Returns null ("LSP not available")
-        ///
-        /// The source parameter is populated with a short label describing which
-        /// branch resolved the path ("manual", "bundled", "vscode-stable",
-        /// "vscode-insiders", "vscode-custom") or an error message for lsp_start to surface.
-        /// </summary>
-        private string ResolveLspServerPath(out string source)
-        {
-            source = null;
-
-            // 1. Manual override — never superseded
-            if (_chatControl != null)
-            {
-                string configured = _chatControl.Settings?.Get("Lsp.ServerPath");
-                if (!string.IsNullOrEmpty(configured) && File.Exists(configured))
-                {
-                    source = "manual (Lsp.ServerPath)";
-                    return configured;
-                }
-            }
-
-            // 2. Bundled server next to the addin — PREFERRED. Ships with the addin via
-            //    deploy.ps1 and is version-locked to its features (completion, etc.), so it
-            //    must win over an externally-installed VS Code extension that may be older
-            //    and reject newer methods (e.g. textDocument/completion → JSON-RPC -32601).
-            string assemblyDir = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
-            string lspPath = Path.Combine(assemblyDir, "lsp-server", "out", "server", "src", "server.js");
-            if (File.Exists(lspPath))
-            {
-                source = "bundled (lsp-server next to addin)";
-                return lspPath;
-            }
-
-            // 3. VS Code extension scan — fallback only when no bundled server is present
-            //    (e.g. a dev build run without a deployed lsp-server folder).
-            string vsCodeError = null;
-            string vsCodePath = DiscoverVsCodeLspServer(out source, out vsCodeError);
-            if (vsCodePath != null)
-                return vsCodePath;
-
-            // 4. Nothing found. Prefer the VS Code error if the scan had one
-            //    (more actionable than "no bundled LSP"), otherwise leave source null.
-            if (vsCodeError != null)
-                source = vsCodeError;
-            return null;
-        }
-
-        /// <summary>
-        /// Scans the Clarion VS Code extension install locations for the Clarion
-        /// Language Server. Returns the path to server.js for the highest stable
-        /// version found, or null if none resolved. When the scan hits a known
-        /// installed extension that's missing the expected layout (e.g., the
-        /// extension was refactored in a newer version), sets layoutError with a
-        /// descriptive message so lsp_start can surface it.
-        /// </summary>
-        private string DiscoverVsCodeLspServer(out string source, out string layoutError)
-        {
-            source = null;
-            layoutError = null;
-
-            // Candidate roots, in order: explicit env override, Stable, Insiders.
-            var candidateRoots = new List<KeyValuePair<string, string>>();
-            string envOverride = Environment.GetEnvironmentVariable("VSCODE_EXTENSIONS");
-            if (!string.IsNullOrEmpty(envOverride))
-                candidateRoots.Add(new KeyValuePair<string, string>(envOverride, "vscode-custom"));
-
-            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            candidateRoots.Add(new KeyValuePair<string, string>(
-                Path.Combine(userProfile, ".vscode", "extensions"), "vscode-stable"));
-            candidateRoots.Add(new KeyValuePair<string, string>(
-                Path.Combine(userProfile, ".vscode-insiders", "extensions"), "vscode-insiders"));
-
-            foreach (var root in candidateRoots)
-            {
-                if (!Directory.Exists(root.Key)) continue;
-
-                string serverJs = FindBestClarionExtensionInRoot(root.Key, out layoutError);
-                if (serverJs != null)
-                {
-                    string version = ExtractVersionFromExtensionPath(serverJs);
-                    source = root.Value + (version != null ? " v" + version : "");
-                    return serverJs;
-                }
-                // Layout error from this root is worth reporting even if other roots are empty.
-                if (layoutError != null)
-                    return null;
-            }
-
-            return null;
-        }
-
-        /// <summary>
-        /// Scan a single VS Code extensions root for Clarion LSP. Honors the
-        /// .obsolete tombstone file, picks the highest stable SemVer, and verifies
-        /// the expected server.js layout exists. Sets layoutError when a candidate
-        /// was found but its layout was unrecognised (so the caller can surface a
-        /// descriptive error instead of silently falling through).
-        /// </summary>
-        private string FindBestClarionExtensionInRoot(string extensionsRoot, out string layoutError)
-        {
-            layoutError = null;
-
-            HashSet<string> obsolete = LoadObsoleteSet(extensionsRoot);
-
-            var candidates = new List<KeyValuePair<string, Version>>();
-            string[] stablePrefixed;
-            try
-            {
-                stablePrefixed = Directory.GetDirectories(extensionsRoot, "msarson.clarion-extensions-*");
-            }
-            catch
-            {
-                return null;
-            }
-
-            foreach (string dir in stablePrefixed)
-            {
-                string folderName = Path.GetFileName(dir);
-                if (obsolete.Contains(folderName)) continue;
-
-                Version v = ParseExtensionVersion(folderName);
-                if (v == null) continue;
-                candidates.Add(new KeyValuePair<string, Version>(dir, v));
-            }
-
-            if (candidates.Count == 0) return null;
-
-            // Sort descending by parsed Version — stable > prerelease handled by ParseExtensionVersion.
-            candidates.Sort((a, b) => b.Value.CompareTo(a.Value));
-
-            foreach (var candidate in candidates)
-            {
-                string serverJs = Path.Combine(candidate.Key, "out", "server", "src", "server.js");
-                if (File.Exists(serverJs)) return serverJs;
-            }
-
-            // We found extension folders but none had the expected server.js layout.
-            // Report loudly so the user knows to file a bug or set Lsp.ServerPath manually.
-            string highest = Path.GetFileName(candidates[0].Key);
-            layoutError = "Clarion VS Code extension found (" + highest + ") but '"
-                + Path.Combine("out", "server", "src", "server.js")
-                + "' was not present. The extension layout may have changed in a newer version. "
-                + "Set the 'Lsp.ServerPath' setting to the actual server.js location as a workaround.";
-            return null;
-        }
-
-        /// <summary>
-        /// Reads the .obsolete JSON file in a VS Code extensions directory (if any)
-        /// and returns the set of tombstoned extension folder names. VS Code writes
-        /// this file as a map of {"folder-name": true} entries for extensions it has
-        /// marked obsolete but not yet deleted; we must exclude these from discovery.
-        /// </summary>
-        private HashSet<string> LoadObsoleteSet(string extensionsRoot)
-        {
-            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            try
-            {
-                string obsoletePath = Path.Combine(extensionsRoot, ".obsolete");
-                if (!File.Exists(obsoletePath)) return set;
-
-                string json = File.ReadAllText(obsoletePath);
-                var serializer = new JavaScriptSerializer();
-                var map = serializer.Deserialize<Dictionary<string, object>>(json);
-                if (map != null)
-                {
-                    foreach (var key in map.Keys)
-                        set.Add(key);
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine("[LSP] Failed to read .obsolete at " + extensionsRoot + ": " + ex.Message);
-            }
-            return set;
-        }
-
-        /// <summary>
-        /// Parses the version suffix of a folder like "msarson.clarion-extensions-0.8.7"
-        /// or "msarson.clarion-extensions-0.10.0-beta.1" into a System.Version. Pre-release
-        /// suffixes are downranked by subtracting 1 from the build component so stable
-        /// releases always sort higher than their corresponding pre-releases.
-        /// Returns null if the folder name isn't parseable.
-        /// </summary>
-        private Version ParseExtensionVersion(string folderName)
-        {
-            const string prefix = "msarson.clarion-extensions-";
-            if (!folderName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return null;
-
-            string versionPart = folderName.Substring(prefix.Length);
-            bool isPrerelease = false;
-            int dashIdx = versionPart.IndexOf('-');
-            if (dashIdx >= 0)
-            {
-                isPrerelease = true;
-                versionPart = versionPart.Substring(0, dashIdx);
-            }
-
-            // Ensure 3 components — System.Version needs major.minor[.build[.revision]].
-            string[] parts = versionPart.Split('.');
-            if (parts.Length < 2 || parts.Length > 4) return null;
-
-            try
-            {
-                int major = int.Parse(parts[0]);
-                int minor = int.Parse(parts[1]);
-                int build = parts.Length > 2 ? int.Parse(parts[2]) : 0;
-                int revision = parts.Length > 3 ? int.Parse(parts[3]) : (isPrerelease ? 0 : 1);
-                // Pre-releases get revision=0, stables get revision=1 so stable > pre at equal build.
-                if (!isPrerelease && parts.Length <= 3) revision = 1;
-                return new Version(major, minor, build, revision);
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// Extracts the extension version from a resolved server.js path for display.
-        /// Walks up from out\server\src\server.js to the extension folder.
-        /// </summary>
-        private string ExtractVersionFromExtensionPath(string serverJsPath)
-        {
-            try
-            {
-                string folder = Path.GetFileName(
-                    Path.GetDirectoryName(
-                        Path.GetDirectoryName(
-                            Path.GetDirectoryName(
-                                Path.GetDirectoryName(serverJsPath)))));
-                const string prefix = "msarson.clarion-extensions-";
-                if (folder != null && folder.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                    return folder.Substring(prefix.Length);
-            }
-            catch { }
-            return null;
-        }
-
-        /// <summary>
         /// Starts the LSP in the background if not already running. Safe to call from the
         /// UI thread — the start (process spawn + initialize, which can block several
         /// seconds) runs on a thread-pool thread. Used to eager-start the server on
         /// solution-select so embeditor completion is fully populated without the user
         /// first invoking an LSP feature. No-op if already running.
         /// </summary>
-        private int _lspStarting; // 0 = idle, 1 = a background start is in flight
         public void EnsureLspRunningInBackground()
         {
-            if (_lspClient != null && _lspClient.IsRunning) return;
-            // Only one background start at a time — the self-heal path can call this on
-            // every completion attempt, and EnsureLspRunning isn't safe to run concurrently.
-            if (System.Threading.Interlocked.CompareExchange(ref _lspStarting, 1, 0) != 0) return;
-            System.Threading.Tasks.Task.Run(() =>
-            {
-                try { EnsureLspRunning(); }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine(
-                        "[McpToolRegistry] background EnsureLspRunning failed: " + ex.Message);
-                }
-                finally { System.Threading.Interlocked.Exchange(ref _lspStarting, 0); }
-            });
+            // Delegate to the process-wide owner (LspService has its own CAS guard).
+            LspService.EnsureRunningInBackground();
         }
 
         private void EnsureLspRunning()
         {
-            if (_lspClient != null && _lspClient.IsRunning) return;
-            if (_chatControl == null) return;
-
-            string slnPath = _chatControl.CurrentSolutionPath;
-            if (string.IsNullOrEmpty(slnPath)) return;
-
-            string wsPath = Path.GetDirectoryName(slnPath);
-            string ignoredSource;
-            string serverJs = ResolveLspServerPath(out ignoredSource);
-            if (serverJs == null) return;
-
-            if (_lspClient != null) _lspClient.Dispose();
-            _lspClient = new LspClient();
-
-            // Build clarion/updatePaths for cross-file LSP features (definition, references, etc.)
-            try
-            {
-                var versionConfig = _chatControl.CurrentVersionConfig;
-                if (versionConfig != null)
-                {
-                    var redFile = _chatControl.RedFile;
-                    var redirectionPaths = new List<string>();
-                    var libsrcPaths = new List<string>();
-                    var projectPaths = new List<string>();
-
-                    if (redFile != null)
-                    {
-                        redirectionPaths = redFile.GetSearchPaths(".clw");
-                    }
-
-                    // libsrcPaths from ClarionProperties.xml <libsrc> (not the red file — see #15)
-                    libsrcPaths = versionConfig.LibSrcPaths ?? new List<string>();
-
-                    // projectPaths is just the solution directory (see #16)
-                    projectPaths.Add(wsPath);
-
-                    _lspClient.SetUpdatePaths(new Dictionary<string, object>
-                    {
-                        { "solutionFilePath", slnPath },
-                        { "redirectionFile", versionConfig.RedFilePath ?? "" },
-                        { "clarionVersion", versionConfig.Name ?? "" },
-                        { "configuration", "Debug" },
-                        { "macros", versionConfig.Macros ?? new Dictionary<string, string>() },
-                        { "redirectionPaths", redirectionPaths },
-                        { "libsrcPaths", libsrcPaths },
-                        { "projectPaths", projectPaths },
-                        { "defaultLookupExtensions", new[] { ".clw", ".inc", ".equ", ".int" } }
-                    });
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine("[McpToolRegistry] Failed to build LSP updatePaths: " + ex.Message);
-            }
-
-            string wsUri = "file:///" + wsPath.Replace("\\", "/");
-            string wsName = Path.GetFileName(wsPath);
-            _lspClient.Start(serverJs, wsUri, wsName);
+            // LspService is the single owner of the one LspClient. After this returns,
+            // _lspClient == LspClient.Active == the one running client (when startable).
+            LspService.EnsureRunning();
+            _lspClient = LspClient.Active;
         }
 
         private string FormatLspResult(Dictionary<string, object> response)

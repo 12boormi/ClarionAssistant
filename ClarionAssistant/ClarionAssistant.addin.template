@@ -6,6 +6,11 @@
     <Import assembly="ClarionAssistant.dll"/>
   </Runtime>
 
+  <!-- Start the Clarion LSP early and independent of any pad (see LspAutostartCommand). -->
+  <Path name="/Workspace/Autostart">
+    <Class id="ClarionAssistantStartLsp" class="ClarionAssistant.LspAutostartCommand"/>
+  </Path>
+
   <Path name="/SharpDevelop/Workbench/Pads">
     <Pad id="ClassHelper" category="Tools" title="Class Helper"
          icon="PadIcons.ClassBrowser" shortcut="Control|Alt|M"

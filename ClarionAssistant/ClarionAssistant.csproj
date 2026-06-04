@@ -94,12 +94,14 @@
     <Compile Include="Services\ClarionVersionService.cs" />
     <Compile Include="Services\RedFileService.cs" />
     <Compile Include="Services\LspClient.cs" />
+    <Compile Include="Services\LspService.cs" />
     <Compile Include="Services\LibraryIndexer.cs" />
     <Compile Include="Services\AppTreeService.cs" />
     <Compile Include="Services\IdeReflectionService.cs" />
     <Compile Include="Services\EmbeditorCompletionService.cs" />
     <Compile Include="EmbeditorCompletionTestCommand.cs" />
     <Compile Include="ShowModernEmbeditorCommand.cs" />
+    <Compile Include="LspAutostartCommand.cs" />
     <Compile Include="OpenModernEmbeditorPickerCommand.cs" />
     <Compile Include="ShowModernDataPadCommand.cs" />
     <Compile Include="Terminal\ModernDataPad.cs" />
