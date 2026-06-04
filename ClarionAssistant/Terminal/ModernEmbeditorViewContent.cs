@@ -176,7 +176,6 @@ namespace ClarionAssistant.Terminal
         public static void RefreshPadSources()
         {
             // (1) Whole-app .txa — silent Export(path, all=TRUE), validated. Source for Local/Global Data.
-            var swTxa = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 string tmp = Path.Combine(Path.GetTempPath(), "ClarionModernData_wholeapp.txa");
@@ -188,10 +187,8 @@ namespace ClarionAssistant.Terminal
                 }
             }
             catch { /* keep prior .txa cache */ }
-            ModernEmbeditorLauncher.TimingLog("RefreshPadSources: whole-app .txa export", swTxa.ElapsedMilliseconds);
 
             // (2) Live dictionary snapshot — the master Tables read from App.FileSchema.DataDictionary.
-            var swDict = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 var tables = new AppTreeService().ReadLiveDictionaryTables();
@@ -204,7 +201,6 @@ namespace ClarionAssistant.Terminal
                 }
             }
             catch { /* keep prior dict cache; GetOtherFiles falls back to the .dcv */ }
-            ModernEmbeditorLauncher.TimingLog("RefreshPadSources: live dict snapshot", swDict.ElapsedMilliseconds);
         }
 
         // Parsed dictionary (.dcv) tables, cached by path + mtime so we re-parse only when Clarion's
@@ -592,14 +588,10 @@ namespace ClarionAssistant.Terminal
             if (_isInitializing || _isInitialized) return;
             _isInitializing = true;
 
-            var swInit = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 var environment = await WebView2EnvironmentCache.GetEnvironmentAsync();
-                ModernEmbeditorLauncher.TimingLog("OnHandleCreated: GetEnvironmentAsync", swInit.ElapsedMilliseconds);
-                var swEnsure = System.Diagnostics.Stopwatch.StartNew();
                 await _webView.EnsureCoreWebView2Async(environment);
-                ModernEmbeditorLauncher.TimingLog("OnHandleCreated: EnsureCoreWebView2Async", swEnsure.ElapsedMilliseconds);
 
                 _tempDir = Path.Combine(Path.GetTempPath(), "ClarionEmbeditor_" + Guid.NewGuid().ToString("N").Substring(0, 8));
                 Directory.CreateDirectory(_tempDir);
@@ -625,7 +617,6 @@ namespace ClarionAssistant.Terminal
                 // On open (UI thread): refresh the pad's IDE-sourced caches (whole-app .txa for Local/Global
                 // Data; live dictionary snapshot for Other Files). Silent.
                 RefreshPadSources();
-                ModernEmbeditorLauncher.TimingLog("OnHandleCreated TOTAL (WebView2 + RefreshPadSources)", swInit.ElapsedMilliseconds);
             }
             catch (Exception ex)
             {
@@ -715,7 +706,6 @@ namespace ClarionAssistant.Terminal
         // WebView2 message loop and deadlock the IDE.
         private void RunSaveRoundTrip(List<string> current)
         {
-            ModernEmbeditorLauncher.TimingMark("=== HandleSave round-trip START (deferred) '" + _procedureName + "' ===");
             bool ok;
             string msg = ModernEmbeditorSaver.Save(_procedureName, _editableRanges, _originalSlotTexts, current, out ok);
             // On success, the saved content is the new baseline so a follow-up save sees no changes.
@@ -725,7 +715,6 @@ namespace ClarionAssistant.Terminal
             // Refresh the pad's IDE-sourced caches (UI thread) so Local/Global Data + Other Files reflect the save.
             if (ok) RefreshPadSources();
             PostSaveResult(ok, msg);
-            ModernEmbeditorLauncher.TimingMark("=== HandleSave round-trip DONE (ok=" + ok + ") ===");
         }
 
         /// <summary>Re-select this view's tab (the save round-trip activates the app tree to drive the embeditor).</summary>

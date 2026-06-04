@@ -581,13 +581,21 @@ Use this tool to discover IDE APIs and understand what's available for automatio
                                     "Editing here may cause save conflicts. Proceeding anyway.",
                                     conflict.Pid, name, Path.GetFileName(conflict.AppFile ?? ""));
                                 string result = _appTree.OpenProcedureEmbed(name);
+                                // OpenProcedureEmbed no longer sleeps after BM_CLICK (the embed open is async);
+                                // wait for the embed to actually open before returning, else the tool reports
+                                // success before the editor is ready.
+                                ModernEmbeditorLauncher.WaitForEmbedOpen(_appTree, 45000);
                                 return warning + "\n\n" + result;
                             }
                         }
                         catch { /* conflict check failed — proceed anyway */ }
                     }
 
-                    return _appTree.OpenProcedureEmbed(name);
+                    string openResult = _appTree.OpenProcedureEmbed(name);
+                    // OpenProcedureEmbed no longer sleeps after BM_CLICK (async open); wait for the embed to
+                    // actually open before returning so this tool doesn't report success prematurely.
+                    ModernEmbeditorLauncher.WaitForEmbedOpen(_appTree, 45000);
+                    return openResult;
                 }
             });
 

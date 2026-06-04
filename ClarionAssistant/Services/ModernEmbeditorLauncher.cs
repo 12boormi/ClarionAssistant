@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Runtime.InteropServices;
-using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 using ICSharpCode.SharpDevelop.Gui;
@@ -32,8 +30,6 @@ namespace ClarionAssistant.Services
             EnterBusy();
             try
             {
-                TimingMark("=== OpenProcedure '" + procName + "' START ===");
-                var swTotal = System.Diagnostics.Stopwatch.StartNew();
                 var appTree = new AppTreeService();
 
                 string source, error;
@@ -47,14 +43,9 @@ namespace ClarionAssistant.Services
                 // ~halving it. Idempotent, fire-and-forget.
                 try { EmbeditorCompletionService.LspStarter?.Invoke(); } catch { }
 
-                TimingMark("LSP kicked; about to CancelEmbeditor");
                 // OpenAndMirror leaves the embeditor open; we made no edits, so discard/close to free the lock.
-                var swClose = System.Diagnostics.Stopwatch.StartNew();
                 try { appTree.CancelEmbeditor(); } catch { }
-                TimingMark("CancelEmbeditor returned; waiting for closed");
                 WaitForEmbedClosed(appTree, 3000);
-                TimingLog("CancelEmbeditor+WaitClosed", swClose.ElapsedMilliseconds);
-                TimingLog("OpenProcedure total (pre-deferred-ShowView)", swTotal.ElapsedMilliseconds);
 
                 // CRITICAL — do NOT create the WebView2 view on THIS call stack. We are still unwinding the
                 // nested Application.DoEvents() pumps that drove the native embeditor (SetFocus / AttachThreadInput
@@ -140,152 +131,8 @@ namespace ClarionAssistant.Services
         private static int _busyCount;
         public static bool IsBusy { get { return _busyCount > 0; } }
 
-        // TEMP diagnostic: append a phase timing to C:\Temp\modern-open-timing.log so we can break down where
-        // the Modern-open wall-clock goes (open vs retry vs mirror vs pad-refresh vs WebView2). Remove once tuned.
-        internal static void TimingLog(string label, long ms) { TimingMark(label + " = " + ms + " ms"); }
-        internal static void TimingMark(string text)
-        {
-            try { System.IO.File.AppendAllText(@"C:\Temp\modern-open-timing.log",
-                System.DateTime.Now.ToString("HH:mm:ss.fff") + "  " + text + "\r\n"); }
-            catch { }
-        }
         internal static void EnterBusy() { System.Threading.Interlocked.Increment(ref _busyCount); }
         internal static void LeaveBusy() { System.Threading.Interlocked.Decrement(ref _busyCount); }
-
-        // TEMP diagnostic: start a background (threadpool) watchdog that logs elapsed time every ~500ms while a
-        // potentially-blocking UI-thread native call runs. Because the timer fires on a threadpool thread it keeps
-        // logging EVEN IF the UI thread is hard-frozen, so a hang gets timestamped (we see how long it ran before
-        // the IDE was killed) instead of the log just dying. Dispose the returned token when the call returns.
-        internal static IDisposable StartWatchdog(string label)
-        {
-            return new Watchdog(label);
-        }
-
-        private sealed class Watchdog : IDisposable
-        {
-            private readonly string _label;
-            private readonly System.Diagnostics.Stopwatch _sw;
-            private System.Threading.Timer _timer;
-            private volatile bool _disposed;
-            private bool _noModalNoteLogged;
-            private readonly HashSet<long> _seenModals = new HashSet<long>();
-            public Watchdog(string label)
-            {
-                _label = label;
-                _sw = System.Diagnostics.Stopwatch.StartNew();
-                TimingMark("      [watchdog] " + _label + " START");
-                _timer = new System.Threading.Timer(_ =>
-                {
-                    // Timer.Dispose() doesn't cancel an already-queued threadpool callback; this guard suppresses
-                    // a stray "still running" line that would otherwise print after "DONE".
-                    if (_disposed) return;
-                    try
-                    {
-                        long ms = _sw.ElapsedMilliseconds;
-                        TimingMark("      [watchdog] " + _label + " still running at +" + ms + " ms (UI thread may be blocked)");
-                        // DECISIVE DIAGNOSTIC: once a hang exceeds ~2s, scan THIS process's top-level windows for a
-                        // modal dialog (#32770). Runs on the threadpool thread so it survives a frozen UI. A #32770
-                        // present during a TryClose hang => a hidden "Save changes?" modal stuck behind the WebView2
-                        // tab (the dirty-flag mechanism); none => a pure WebView2 focus/activation deadlock.
-                        if (ms >= 2000) ScanForModal();
-                    }
-                    catch { }
-                }, null, 500, 500);
-            }
-
-            private void ScanForModal()
-            {
-                bool foundAny = false;
-                try
-                {
-                    uint myPid = GetCurrentProcessId();
-                    EnumWindows((h, l) =>
-                    {
-                        try
-                        {
-                            uint wpid; GetWindowThreadProcessId(h, out wpid);
-                            if (wpid != myPid) return true;
-                            if (!IsWindowVisible(h)) return true;
-                            var cls = new StringBuilder(64);
-                            GetClassName(h, cls, cls.Capacity);            // safe: no inter-thread message
-                            if (cls.ToString() == "#32770")                // standard Win32 dialog class
-                            {
-                                foundAny = true;
-                                long key = h.ToInt64();
-                                if (_seenModals.Add(key))
-                                {
-                                    var title = new StringBuilder(200);
-                                    GetWindowText(h, title, title.Capacity); // safe: a modal pumps its own loop
-                                    TimingMark("      [watchdog] !! MODAL #32770 hwnd=" + key.ToString("X") +
-                                        " title='" + title + "' during '" + _label + "' hang => hidden-dialog cause CONFIRMED");
-                                }
-                            }
-                        }
-                        catch { }
-                        return true;
-                    }, IntPtr.Zero);
-                }
-                catch { }
-                if (!foundAny && !_noModalNoteLogged)
-                {
-                    _noModalNoteLogged = true;
-                    TimingMark("      [watchdog] no #32770 modal in process at +" + _sw.ElapsedMilliseconds +
-                        "ms during '" + _label + "' hang => pure focus/activation (e.g. WebView2) suspected; keep scanning");
-                }
-            }
-
-            public void Dispose()
-            {
-                _disposed = true;
-                try { _timer?.Dispose(); } catch { }
-                _timer = null;
-                _sw.Stop();
-                TimingMark("      [watchdog] " + _label + " DONE at +" + _sw.ElapsedMilliseconds + " ms");
-            }
-
-            // P/Invokes for the modal scan. GetClassName / GetWindowThreadProcessId / IsWindowVisible never send an
-            // inter-thread message, so they're safe to call from this threadpool thread even while the UI is frozen;
-            // GetWindowText is only invoked on a #32770 (a modal that pumps its own loop), so it won't block.
-            [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-            [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-            [DllImport("user32.dll", CharSet = CharSet.Auto)] private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
-            [DllImport("user32.dll", CharSet = CharSet.Auto)] private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-            [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
-            [DllImport("kernel32.dll")] private static extern uint GetCurrentProcessId();
-            private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-        }
-
-        // TEMP diagnostic: one-time dump of an object's save/close-related public+nonpublic instance methods to the
-        // timing log, so we can confirm what persist/close primitives the live ClaGenEditor actually exposes (and
-        // their exact parameter signatures) instead of guessing reflection names.
-        private static bool _methodsDumped;
-        internal static void DumpSaveCloseMethods(object editor)
-        {
-            if (editor == null || _methodsDumped) return;
-            _methodsDumped = true;
-            try
-            {
-                var t = editor.GetType();
-                TimingMark("      [api] editor type = " + t.FullName);
-                const System.Reflection.BindingFlags flags =
-                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public |
-                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;
-                foreach (var m in t.GetMethods(flags))
-                {
-                    var n = m.Name;
-                    if (n.IndexOf("save", StringComparison.OrdinalIgnoreCase) < 0 &&
-                        n.IndexOf("close", StringComparison.OrdinalIgnoreCase) < 0 &&
-                        n.IndexOf("exit", StringComparison.OrdinalIgnoreCase) < 0 &&
-                        n.IndexOf("discard", StringComparison.OrdinalIgnoreCase) < 0 &&
-                        n.IndexOf("apply", StringComparison.OrdinalIgnoreCase) < 0 &&
-                        n.IndexOf("commit", StringComparison.OrdinalIgnoreCase) < 0)
-                        continue;
-                    var ps = string.Join(", ", m.GetParameters().Select(p => p.ParameterType.Name + " " + p.Name));
-                    TimingMark("      [api] " + m.DeclaringType.Name + "." + n + "(" + ps + ") : " + m.ReturnType.Name);
-                }
-            }
-            catch (Exception ex) { TimingMark("      [api] dump failed: " + ex.Message); }
-        }
 
         internal static bool OpenAndMirror(AppTreeService appTree, string procName,
             out string source, out List<int[]> ranges, out string error)
@@ -301,23 +148,17 @@ namespace ClarionAssistant.Services
 
                 // Bring the app tree to the front so the native automation works even when a Modern
                 // Embeditor tab is the active document.
-                TimingMark("  attempt " + attempt + " (" + CharDelaysMs[attempt] + "ms/char) START");
                 appTree.ActivateAppView();
-                var swOpen = System.Diagnostics.Stopwatch.StartNew();
                 appTree.OpenProcedureEmbed(procName, CharDelaysMs[attempt]);
-                TimingLog("  attempt " + attempt + " OpenProcedureEmbed", swOpen.ElapsedMilliseconds);
 
                 // First open loads the ABC libraries and can take many seconds; wait generously.
-                var swWait = System.Diagnostics.Stopwatch.StartNew();
                 if (!WaitForEmbedOpen(appTree, 45000))
                 {
                     try { appTree.CancelEmbeditor(); } catch { }
                     error = "Embeditor did not open for '" + procName + "' within 45s.";
                     continue;
                 }
-                TimingLog("  attempt " + attempt + " WaitForEmbedOpen (ABC/native open)", swWait.ElapsedMilliseconds);
 
-                var swMirror = System.Diagnostics.Stopwatch.StartNew();
                 string title, ferr;
                 if (!EmbeditorCompletionService.TryGetActiveEmbeditorSource(out title, out source, out ranges, out ferr))
                 {
@@ -325,14 +166,12 @@ namespace ClarionAssistant.Services
                     error = "Could not read embed source for '" + procName + "': " + ferr;
                     continue;
                 }
-                TimingLog("  attempt " + attempt + " TryGetActiveEmbeditorSource (mirror)", swMirror.ElapsedMilliseconds);
 
                 if (SourceMentionsProcedure(source, procName))
-                { TimingMark("  attempt " + attempt + " VERIFIED OK"); return true; } // correct procedure — leave the embeditor open
+                    return true; // correct procedure — leave the embeditor open
 
                 // Wrong procedure: keystrokes were dropped at this speed. Close and retry slower.
                 try { appTree.CancelEmbeditor(); } catch { }
-                TimingMark("  attempt " + attempt + " MIS-SELECTED — will retry slower");
                 error = "Opened a different procedure than '" + procName + "' — the locator search missed.";
                 source = null; ranges = null;
             }
@@ -365,38 +204,48 @@ namespace ClarionAssistant.Services
         // ~every 120ms, with a 1ms yield to avoid a 100% busy-spin.
         private const int EmbedPollIntervalMs = 120;
 
-        internal static bool WaitForEmbedOpen(AppTreeService appTree, int timeoutMs)
+        // Shared pump: dispatch queued messages and block EFFICIENTLY until `condition` is true or timeout.
+        // Replaces the old DoEvents + Thread.Sleep(1) spin: Sleep(1) actually sleeps ~15.6ms at the default
+        // Windows timer resolution, so each native-generate step that posts-then-yields waited up to ~15ms for
+        // our next pump — throttling the cold ABC generate vs the IDE's own GetMessage loop (the native ~2s
+        // baseline). MsgWaitForMultipleObjectsEx wakes IMMEDIATELY when a message is queued (native-like latency)
+        // and otherwise blocks/yields CPU (no busy-spin) until the next poll is due, so we still re-check
+        // `condition` ~every EmbedPollIntervalMs. UI thread only.
+        internal static bool PumpUntil(Func<bool> condition, int timeoutMs)
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
             long lastPoll = -EmbedPollIntervalMs;
+            bool met = false;
             while (sw.ElapsedMilliseconds < timeoutMs)
             {
-                Application.DoEvents();
+                Application.DoEvents();                          // dispatch whatever woke us
                 if (sw.ElapsedMilliseconds - lastPoll >= EmbedPollIntervalMs)
                 {
                     lastPoll = sw.ElapsedMilliseconds;
-                    if (appTree.GetEmbedInfo() != null) return true;
+                    if (condition()) { met = true; break; }      // GetEmbedInfo is reflection-heavy — keep it gated
                 }
-                Thread.Sleep(1);
+                long sincePoll = sw.ElapsedMilliseconds - lastPoll;
+                uint wait = (uint)Math.Max(1, EmbedPollIntervalMs - sincePoll);
+                // MWMO_INPUTAVAILABLE: return even for input already queued (can't miss a wake); QS_ALLINPUT: any msg.
+                MsgWaitForMultipleObjectsEx(0, IntPtr.Zero, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             }
-            return appTree.GetEmbedInfo() != null;
+            if (!met) met = condition();
+            return met;
+        }
+
+        internal static bool WaitForEmbedOpen(AppTreeService appTree, int timeoutMs)
+        {
+            return PumpUntil(() => appTree.GetEmbedInfo() != null, timeoutMs);
         }
 
         internal static bool WaitForEmbedClosed(AppTreeService appTree, int timeoutMs)
         {
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            long lastPoll = -EmbedPollIntervalMs;
-            while (sw.ElapsedMilliseconds < timeoutMs)
-            {
-                Application.DoEvents();
-                if (sw.ElapsedMilliseconds - lastPoll >= EmbedPollIntervalMs)
-                {
-                    lastPoll = sw.ElapsedMilliseconds;
-                    if (appTree.GetEmbedInfo() == null) return true;
-                }
-                Thread.Sleep(1);
-            }
-            return appTree.GetEmbedInfo() == null;
+            return PumpUntil(() => appTree.GetEmbedInfo() == null, timeoutMs);
         }
+
+        [DllImport("user32.dll")]
+        private static extern uint MsgWaitForMultipleObjectsEx(uint nCount, IntPtr pHandles, uint dwMilliseconds, uint dwWakeMask, uint dwFlags);
+        private const uint QS_ALLINPUT = 0x04FF;
+        private const uint MWMO_INPUTAVAILABLE = 0x0004;
     }
 }

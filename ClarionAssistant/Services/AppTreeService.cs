@@ -866,10 +866,11 @@ namespace ClarionAssistant.Services
                     return log.ToString();
                 }
 
-                // Send BM_CLICK to the Embeditor button
+                // Send BM_CLICK to the Embeditor button. One DoEvents dispatches the posted click; we do NOT
+                // sleep here — the caller (OpenAndMirror) immediately runs WaitForEmbedOpen, which polls
+                // GetEmbedInfo() while pumping DoEvents until the embed actually opens. The old fixed
+                // Sleep(500) was therefore pure dead latency the poll already covers (~500ms off every open). [perf]
                 SendMessage(embeditorBtn, BM_CLICK, IntPtr.Zero, IntPtr.Zero);
-                Application.DoEvents();
-                System.Threading.Thread.Sleep(500);
                 Application.DoEvents();
 
                 log.AppendLine("BM_CLICK sent to Embeditor button");
@@ -1038,9 +1039,6 @@ namespace ClarionAssistant.Services
             if (editor == null) return "Error: No embeditor is currently open.";
 
             var et = editor.GetType();
-            // One-time diagnostic dump of the live editor's persist/close API (no-op after first call).
-            ModernEmbeditorLauncher.DumpSaveCloseMethods(editor);
-
             var dialogInterface = et.GetInterface("SoftVelocity.Generator.IGeneratorDialog");
             var tryCloseMethod = dialogInterface?.GetMethod("TryClose");
 
@@ -1055,11 +1053,9 @@ namespace ClarionAssistant.Services
             var saveMethod = et.GetMethod("Save", AllInstance, null, Type.EmptyTypes, null);
             if (saveMethod != null)
             {
-                ModernEmbeditorLauncher.TimingMark("      SaveAndClose: Strategy A (discrete Save + TryClose)");
                 try
                 {
-                    using (ModernEmbeditorLauncher.StartWatchdog("Save()"))
-                        saveMethod.Invoke(editor, null);
+                    saveMethod.Invoke(editor, null);
                 }
                 catch (Exception ex)
                 {
@@ -1082,32 +1078,27 @@ namespace ClarionAssistant.Services
                 // CLOSE STEP — make this byte-for-byte identical to the PROVEN open-path discard close
                 // (CancelEmbeditor), the only TryClose() that has ever completed reliably here. The save-close hung
                 // because it differed in TWO ways from that path; both re-applied now (team 3-way root-cause):
-                LogActivationState("A:close-entry");
                 //  (1) [Diana] force-SET IsDirty=false via the WRITABLE reflection setter. Save() makes the readable
                 //      flag false but evidently leaves a SEPARATE internal modified flag set that TryClose->OnBackClick
                 //      reads; while it still looks "dirty", OnBackClick pops a "Save changes?" modal that is stuck
                 //      behind the active WebView2 tab -> UI-thread hang. The setter (used by the discard path) clears
                 //      that flag. Safe: persistence is already confirmed above, so this can't drop real changes.
                 TrySetIsDirtyFalse(editor);
-                ModernEmbeditorLauncher.TimingMark("      SaveAndClose: IsDirty(after TrySetIsDirtyFalse)=" + GetIsDirty(editor));
                 //  (2) [Eve] re-assert the app view as the active document so TryClose's close-time focus-restore
                 //      targets the app window, not the live WebView2 Modern tab (SetFocus on the WebView2 child on the
                 //      pumped close stack deadlocks the browser focus handshake). Mirrors OpenAndMirror at open time.
                 //      The Modern tab is re-selected afterward by ModernEmbeditorViewContent.BringToFront (deferred).
                 ActivateAppView();
-                LogActivationState("A:pre-TryClose");
 
                 bool closedA;
                 try
                 {
-                    using (ModernEmbeditorLauncher.StartWatchdog("TryClose()"))
-                        closedA = (bool)tryCloseMethod.Invoke(editor, null);
+                    closedA = (bool)tryCloseMethod.Invoke(editor, null);
                 }
                 catch (Exception ex)
                 {
                     return "Error: TryClose threw after a successful save: " + (ex.InnerException?.Message ?? ex.Message);
                 }
-                LogActivationState("A:post-TryClose");
                 // TryClose()==false is a HARD ERROR (review: a wedged-open editor breaks the single-editor
                 // invariant; the saver only treats "Error"-prefixed strings as failure).
                 if (!closedA)
@@ -1120,24 +1111,20 @@ namespace ClarionAssistant.Services
             }
 
             // Strategy B (fallback): NO discrete Save() exists, so the only persist primitive is SaveAndExit() —
-            // the SAME call identified as the UI-thread hang. We surface this explicitly (return string + log +
-            // watchdog) so a hang is unambiguous and a passing test conclusively shows which path ran; it is NOT
-            // a silent reroute into the hang (review: silent SaveAndExit fallback). The one-time [api] dump above
-            // tells us whether Save() exists on the live editor so this branch can be retired if it never fires.
+            // the SAME call identified as the UI-thread hang. We surface this explicitly (return string) so a hang
+            // is unambiguous and a passing test conclusively shows which path ran; it is NOT a silent reroute into
+            // the hang (review: silent SaveAndExit fallback).
             var saveAndExit = et.GetMethod("SaveAndExit", AllInstance, null, Type.EmptyTypes, null);
             if (saveAndExit != null)
             {
-                // NOTE: effectively DEAD on the current build — the [api] dump confirms a discrete Save() exists, so
+                // NOTE: effectively DEAD on the current build — a discrete Save() exists, so
                 // Strategy A always wins. Kept for older generators. SaveAndExit() bundles save+close, so we can't
                 // inject TrySetIsDirtyFalse between them (it must still save); we can at least re-assert the app view
                 // first so its internal close's focus-restore targets the app window, not the WebView2 tab. [Eve]
-                ModernEmbeditorLauncher.TimingMark("      SaveAndClose: Strategy B (SaveAndExit fallback — no discrete Save(); known UI-thread-hang path)");
-                LogActivationState("B:pre-SaveAndExit");
                 ActivateAppView();
                 try
                 {
-                    using (ModernEmbeditorLauncher.StartWatchdog("SaveAndExit()"))
-                        saveAndExit.Invoke(editor, null);
+                    saveAndExit.Invoke(editor, null);
                 }
                 catch (Exception ex)
                 {
@@ -1198,54 +1185,8 @@ namespace ClarionAssistant.Services
                     last = GetIsDirty(editor);
                     if (last == false) break;
                 }
-                ModernEmbeditorLauncher.TimingMark("      SaveAndClose: IsDirty first=" + first + " final=" + last +
-                    " after " + sw.ElapsedMilliseconds + "ms");
-            }
-            else
-            {
-                ModernEmbeditorLauncher.TimingMark("      SaveAndClose: IsDirty(after save)=False (cleared immediately)");
             }
             return last;
-        }
-
-        // TEMP diagnostic (UI thread): snapshot foreground/focus window + active workbench doc at a tagged moment.
-        // When TryClose COMPLETES, comparing close-entry vs pre-TryClose shows whether ActivateAppView actually moved
-        // foreground off the WebView2 Modern tab onto the app window (Eve's mechanism). Pairs with the watchdog
-        // #32770 scan, which is the diagnostic that survives a CONTINUED hang (this one only logs if we get that far).
-        private void LogActivationState(string tag)
-        {
-            try
-            {
-                string activeDoc = "";
-                try
-                {
-                    var workbench = WorkbenchSingleton.Workbench;
-                    var aww = GetProp(workbench, "ActiveWorkbenchWindow");
-                    if (aww != null)
-                        activeDoc = (GetProp(aww, "Title")?.ToString()) ?? aww.GetType().Name;
-                }
-                catch { }
-                ModernEmbeditorLauncher.TimingMark("      [activation] " + tag +
-                    " fg=" + WinDesc(GetForegroundWindow()) + " focus=" + WinDesc(GetFocus()) +
-                    " activeDoc='" + activeDoc + "'");
-            }
-            catch { }
-        }
-
-        private static string WinDesc(IntPtr h)
-        {
-            if (h == IntPtr.Zero) return "0";
-            try
-            {
-                var cls = new StringBuilder(96);
-                GetClassName(h, cls, cls.Capacity);
-                var txt = new StringBuilder(96);
-                GetWindowText(h, txt, txt.Capacity);
-                string t = txt.ToString();
-                if (t.Length > 40) t = t.Substring(0, 40);
-                return h.ToInt64().ToString("X") + ":" + cls + (t.Length > 0 ? " '" + t + "'" : "");
-            }
-            catch { return h.ToInt64().ToString("X") + ":?"; }
         }
 
         private bool? GetIsDirty(object editor)
@@ -1287,7 +1228,6 @@ namespace ClarionAssistant.Services
         /// </summary>
         public string CancelEmbeditor()
         {
-            ModernEmbeditorLauncher.TimingMark("    CancelEmbeditor: find editor");
             var editor = GetClaGenEditor();
             if (editor == null) return "Error: No embeditor is currently open.";
 
@@ -1304,15 +1244,12 @@ namespace ClarionAssistant.Services
                 // to discard. So gate Discard on IsDirty. (NOTE: TryClose was once thought reliable ~13ms, but the
                 // 10:52 live log proves it ALSO hangs intermittently — see the close block below for the real cause.)
                 bool? dirty = GetIsDirty(editor);
-                ModernEmbeditorLauncher.TimingMark("    CancelEmbeditor: IsDirty(before)=" + dirty);
                 if (dirty == true)
                 {
                     var discardMethod = dialogInterface.GetMethod("Discard");
                     if (discardMethod != null)
                     {
-                        ModernEmbeditorLauncher.TimingMark("    CancelEmbeditor: Discard()");
                         discardMethod.Invoke(editor, null);
-                        ModernEmbeditorLauncher.TimingMark("    CancelEmbeditor: Discard done");
                     }
                 }
 
@@ -1327,15 +1264,9 @@ namespace ClarionAssistant.Services
                     // is that TryClose's close-time focus-restore touches an ACTIVE WebView2 Modern tab and deadlocks
                     // the browser focus handshake (hangs only when a Modern tab is active; first-open-of-session is
                     // fast). So apply the same fix the save path uses: re-assert the app view as active document so
-                    // the focus-restore targets the app window, not the WebView2 child. Watchdog-wrapped + activation
-                    // logging so a continued hang still yields the #32770 modal scan + focus snapshot on THIS path.
-                    LogActivationState("Cancel:close-entry");
+                    // the focus-restore targets the app window, not the WebView2 child.
                     ActivateAppView();
-                    LogActivationState("Cancel:pre-TryClose");
-                    using (ModernEmbeditorLauncher.StartWatchdog("CancelEmbeditor.TryClose()"))
-                        tryCloseMethod.Invoke(editor, null);
-                    LogActivationState("Cancel:post-TryClose");
-                    ModernEmbeditorLauncher.TimingMark("    CancelEmbeditor: TryClose done");
+                    tryCloseMethod.Invoke(editor, null);
                 }
 
                 return "Embeditor changes discarded and closed.";
