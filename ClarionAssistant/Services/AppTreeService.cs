@@ -354,9 +354,6 @@ namespace ClarionAssistant.Services
         private static extern bool SetForegroundWindow(IntPtr hWnd);
 
         [DllImport("user32.dll")]
-        private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
-
-        [DllImport("user32.dll")]
         private static extern short VkKeyScan(char ch);
 
         [DllImport("user32.dll")]
@@ -374,18 +371,11 @@ namespace ClarionAssistant.Services
         [DllImport("kernel32.dll")]
         private static extern uint GetCurrentThreadId();
 
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-
         private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
         private const uint KEYEVENTF_KEYUP = 0x0002;
         private const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
         private const byte VK_SHIFT = 0x10;
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct RECT { public int Left, Top, Right, Bottom; }
 
         #endregion
 
@@ -422,8 +412,6 @@ namespace ClarionAssistant.Services
         private const int VK_UP = 0x26;
         private const int VK_DOWN = 0x28;
         private const int VK_CONTROL = 0x11;
-        private const int VK_PRIOR = 0x21; // Page Up
-        private const int VK_NEXT = 0x22;  // Page Down
         private const int GWL_ID = -12;
         private const int MK_LBUTTON = 0x0001;
 
@@ -510,121 +498,6 @@ namespace ClarionAssistant.Services
             }
             catch (Exception ex) { return sb + "\nError: " + (ex.InnerException?.Message ?? ex.Message); }
             return sb.ToString();
-        }
-
-        /// <summary>
-        /// Preload ABC class info by briefly selecting the app's "Global Embeds" view, which fires the
-        /// tab-change event → %ReadABCFiles, then returning to where the user was. MUST run on the IDE UI
-        /// thread (the MCP tool is registered RequiresUiThread): the native SHEET and this call then share
-        /// the UI thread, so <see cref="SetFocus"/> needs no <c>AttachThreadInput</c>, and real
-        /// <c>keybd_event</c> keystrokes update the GLOBAL key-state so Clarion's
-        /// <c>GetKeyState(VK_CONTROL)</c>-gated tab accelerator actually fires. (PostMessage WM_KEYDOWN does
-        /// NOT update key-state — that is why the earlier PostMessage approach silently no-op'd.)
-        ///
-        /// Discovery is rooted at the host control's window, NOT the tabs: the four ClaTab windows
-        /// (Application Tree / Global Properties / Global Embeds / Global Extensions) are zero-size,
-        /// invisible placeholders parented to ClaChildClient as SIBLINGS of the SHEET, so a GetParent walk
-        /// up from a tab never reaches the SHEET. We pick the largest visible ClaSheet under the host.
-        ///
-        /// Navigation is caption-driven (ApplicationMainWindowControl.HostedWindowCaption tracks the active
-        /// view): Ctrl+PageDown until the caption names the Embeds view, then Ctrl+PageUp back to the
-        /// original caption — robust to whatever tab the user started on. %ReadABCFiles only needs to fire
-        /// once, so even an imperfect restore still warms ABC. Returns a per-step diagnostic string.
-        /// </summary>
-        public string PreloadAbcViaGlobalEmbeds()
-        {
-            var log = new StringBuilder();
-            try
-            {
-                var mainCtrl = GetAppMainControl();
-                if (mainCtrl == null) return "Error: no ApplicationMainWindowControl — is an .app open?";
-                if (!mainCtrl.IsHandleCreated) return "Error: ApplicationMainWindowControl has no handle";
-
-                Func<string> caption = () =>
-                    (GetProp(mainCtrl, "HostedWindowCaption") ?? GetProp(mainCtrl, "OriginalWindowCaption") ?? "").ToString();
-                string originalCaption = caption();
-                log.AppendLine("caption(before) = '" + originalCaption + "'");
-
-                // Discover the real, visible ClaSheet directly under the host. Log every visible ClaSheet
-                // so a second sheet in the tree is obvious in the live diagnostics.
-                IntPtr sheetHwnd = IntPtr.Zero;
-                long bestArea = 0;
-                foreach (var (hwnd, cls, vis) in GetChildWindows(mainCtrl.Handle))
-                {
-                    if (cls.IndexOf("ClaSheet", StringComparison.OrdinalIgnoreCase) < 0) continue;
-                    long area = 0;
-                    if (GetWindowRect(hwnd, out RECT r)) area = (long)(r.Right - r.Left) * (r.Bottom - r.Top);
-                    log.AppendLine("  ClaSheet 0x" + hwnd.ToString("X") + " visible=" + vis + " area=" + area);
-                    if (vis && area > bestArea) { bestArea = area; sheetHwnd = hwnd; }
-                }
-                if (sheetHwnd == IntPtr.Zero) return log + "\nError: no visible ClaSheet found under the app host.";
-                log.AppendLine("sheet = 0x" + sheetHwnd.ToString("X") + " (area " + bestArea + ")");
-
-                // On the UI thread (RequiresUiThread) we own the SHEET, so a direct SetFocus works with no
-                // AttachThreadInput. Guard/attach anyway in case a future caller is off-thread.
-                uint sheetThread = GetWindowThreadProcessId(sheetHwnd, out _);
-                uint curThread = GetCurrentThreadId();
-                bool sameThread = sheetThread == curThread;
-                bool attached = !sameThread && AttachThreadInput(curThread, sheetThread, true);
-                log.AppendLine("sameThread=" + sameThread + " attached=" + attached);
-                try
-                {
-                    SetFocus(sheetHwnd);
-                    PumpFor(60);
-                    log.AppendLine("focus = 0x" + GetFocus().ToString("X"));
-
-                    // Forward: Ctrl+PageDown until the caption names the Embeds view (bounded).
-                    bool reached = caption().IndexOf("Embed", StringComparison.OrdinalIgnoreCase) >= 0;
-                    for (int i = 0; i < 6 && !reached; i++)
-                    {
-                        CtrlChord(VK_NEXT);
-                        PumpFor(200);
-                        string c = caption();
-                        log.AppendLine("  +PageDown[" + i + "] = '" + c + "'");
-                        reached = c.IndexOf("Embed", StringComparison.OrdinalIgnoreCase) >= 0;
-                    }
-                    log.AppendLine(reached ? "reached Global Embeds (ABC read fired)"
-                                           : "WARNING: caption never named Embeds within 6 presses");
-
-                    // Let %ReadABCFiles complete (no clean managed 'loaded' signal); pump, don't block.
-                    PumpFor(2500);
-
-                    // Restore: Ctrl+PageUp until the caption matches the original (bounded).
-                    for (int i = 0; i < 6 && caption() != originalCaption; i++)
-                    {
-                        CtrlChord(VK_PRIOR);
-                        PumpFor(200);
-                        log.AppendLine("  -PageUp[" + i + "] = '" + caption() + "'");
-                    }
-                    log.AppendLine("caption(restored) = '" + caption() + "'");
-                }
-                finally { if (attached) AttachThreadInput(curThread, sheetThread, false); }
-
-                return log.ToString();
-            }
-            catch (Exception ex) { return log + "\nError: " + (ex.InnerException?.Message ?? ex.Message); }
-        }
-
-        // Real Ctrl+&lt;vk&gt; chord via keybd_event so the GLOBAL key-state updates and Clarion's
-        // GetKeyState(VK_CONTROL)-gated SHEET tab accelerator fires. PageUp/PageDown are extended keys.
-        private void CtrlChord(int vk)
-        {
-            keybd_event((byte)VK_CONTROL, 0, 0, UIntPtr.Zero);
-            keybd_event((byte)vk, 0, KEYEVENTF_EXTENDEDKEY, UIntPtr.Zero);
-            System.Threading.Thread.Sleep(40);
-            keybd_event((byte)vk, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, UIntPtr.Zero);
-            keybd_event((byte)VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-        }
-
-        // Pump the UI message queue for ~ms without fully blocking the thread (we are ON the UI thread).
-        private void PumpFor(int ms)
-        {
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < ms)
-            {
-                Application.DoEvents();
-                System.Threading.Thread.Sleep(15);
-            }
         }
 
         /// <summary>
@@ -963,6 +836,8 @@ namespace ClarionAssistant.Services
         /// </summary>
         public string SelectProcedure(string procedureName)
         {
+            bool attached = false;
+            uint curThreadId = 0, listThreadId = 0;
             try
             {
                 // Check if an embeditor is already open
@@ -1004,9 +879,8 @@ namespace ClarionAssistant.Services
                 log.AppendLine("ClaList: 0x" + listHwnd.ToString("X"));
 
                 // --- AttachThreadInput + Focus ---
-                uint listThreadId = GetWindowThreadProcessId(listHwnd, out _);
-                uint curThreadId = GetCurrentThreadId();
-                bool attached = false;
+                listThreadId = GetWindowThreadProcessId(listHwnd, out _);
+                curThreadId = GetCurrentThreadId();
 
                 if (listThreadId != curThreadId)
                 {
@@ -1048,16 +922,19 @@ namespace ClarionAssistant.Services
                 System.Threading.Thread.Sleep(300);
                 Application.DoEvents();
 
-                // Detach
-                if (attached)
-                    AttachThreadInput(curThreadId, listThreadId, false);
-
                 log.AppendLine("Done — check ClaList visually for selected procedure");
                 return log.ToString();
             }
             catch (Exception ex)
             {
                 return "Error: " + (ex.InnerException?.Message ?? ex.Message);
+            }
+            finally
+            {
+                // Always release the merged input queue. A leaked AttachThreadInput (e.g. an exception
+                // between attach and the manual detach) poisons the NEXT Modern open's WebView2 init and
+                // can hang the IDE. Mirrors the OpenProcedureEmbed try/finally guard.
+                if (attached) AttachThreadInput(curThreadId, listThreadId, false);
             }
         }
 
