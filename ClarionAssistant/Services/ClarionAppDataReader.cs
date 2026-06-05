@@ -646,6 +646,65 @@ namespace ClarionAssistant.Services
             return outp;
         }
 
+        /// <summary>The PRIMARY browse file of a procedure (Clarion's "File-Browsing List Box") + its browse key.</summary>
+        public class ProcPrimaryFile { public string File; public string Key; }
+
+        /// <summary>
+        /// The PRIMARY file a procedure browses (Clarion's "File-Browsing List Box") plus the KEY it is
+        /// ordered on, from a whole-app TXA's [FILES] block:
+        ///   [FILES] [PRIMARY] &lt;file&gt; [INSTANCE] &lt;n&gt; [KEY] &lt;key&gt; [OTHERS] ...
+        /// Returns null when the procedure has no primary file. Schema for the file comes from the dictionary.
+        /// </summary>
+        public static ProcPrimaryFile ParseTxaPrimaryFile(string txaText, string procName)
+        {
+            if (string.IsNullOrEmpty(txaText) || string.IsNullOrEmpty(procName)) return null;
+            var lines = txaText.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+
+            for (int i = 0; i < lines.Length; i++)
+            {
+                if (lines[i].Trim() != "[PROCEDURE]") continue;
+
+                string name = null; int nameAt = -1;
+                for (int j = i + 1; j < Math.Min(i + 6, lines.Length); j++)
+                {
+                    var mt = Regex.Match(lines[j], @"^\s*NAME\s+(.+?)\s*$");
+                    if (mt.Success) { name = mt.Groups[1].Value.Trim(); nameAt = j; break; }
+                }
+                if (name == null || !string.Equals(name, procName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Sections BEFORE [FILES] ([COMMON], [DATA], ...) are skipped. Once inside [FILES],
+                // [PRIMARY] holds the file and [KEY] the browse key; [INSTANCE] (a control number) and
+                // [OTHERS] are ignored. The FILES block ends at the next unrelated section ([PROMPTS],
+                // [EMBED], ...) or the next [PROCEDURE].
+                string primary = null, key = null, sub = null;
+                bool inFiles = false;
+                for (int k = nameAt + 1; k < lines.Length; k++)
+                {
+                    string t = lines[k].Trim();
+                    if (t == "[PROCEDURE]") break;
+                    if (t.StartsWith("["))
+                    {
+                        if (t == "[FILES]") { inFiles = true; sub = null; continue; }
+                        if (inFiles)
+                        {
+                            if (t == "[PRIMARY]" || t == "[INSTANCE]" || t == "[KEY]" || t == "[OTHERS]")
+                            { sub = t; continue; }
+                            break; // a non-FILES section after [FILES] → block ended
+                        }
+                        sub = null; // section before [FILES] — keep scanning until we reach it
+                        continue;
+                    }
+                    if (!inFiles || t.Length == 0) continue;
+                    if (sub == "[PRIMARY]" && primary == null) primary = t;
+                    else if (sub == "[KEY]" && key == null) key = t;
+                }
+                if (string.IsNullOrEmpty(primary)) return null;
+                return new ProcPrimaryFile { File = primary, Key = key ?? "" };
+            }
+            return null;
+        }
+
         /// <summary>A ROUTINE declaration: its label and the 1-based source line it's declared on.</summary>
         public class RoutineDef { public string Name; public int Line; }
 

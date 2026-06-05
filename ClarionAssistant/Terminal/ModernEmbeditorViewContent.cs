@@ -383,6 +383,53 @@ namespace ClarionAssistant.Terminal
         }
 
         /// <summary>
+        /// The procedure's PRIMARY browse file (Clarion's "File-Browsing List Box") enriched from the live
+        /// dictionary, carrying the browse KEY. Returns 0 or 1 entries (a list keeps the frontend renderer
+        /// uniform with Other Files / Declared Tables).
+        /// </summary>
+        private List<Dictionary<string, object>> GetBrowseFiles(string txa)
+        {
+            var outp = new List<Dictionary<string, object>>();
+            try
+            {
+                if (string.IsNullOrEmpty(txa) || string.IsNullOrEmpty(_procedureName)) return outp;
+                var pf = ClarionAppDataReader.ParseTxaPrimaryFile(txa, _procedureName);
+                if (pf == null || string.IsNullOrEmpty(pf.File)) return outp;
+
+                Dictionary<string, ClarionAppDataReader.TableDef> live;
+                lock (_liveLock) { live = _liveTables; }
+                ClarionAppDataReader.TableDef t = null;
+                if (live != null) live.TryGetValue(pf.File, out t);
+
+                Dictionary<string, object> d;
+                if (t != null)
+                {
+                    var cols = new List<object>();
+                    foreach (var f in t.Fields) cols.Add(ColToDict(f));
+                    d = new Dictionary<string, object>
+                    {
+                        { "name", t.Name }, { "prefix", t.Prefix },
+                        { "attributes", BuildTableAttributes(t) }, { "description", t.Description ?? "" },
+                        { "columns", cols }, { "keys", KeysToDicts(t) }, { "relations", RelationsToDicts(t) }
+                    };
+                }
+                else
+                {
+                    // Listed but no live-dict schema yet — still show the file + key.
+                    d = new Dictionary<string, object>
+                    {
+                        { "name", pf.File }, { "prefix", "" }, { "attributes", "" }, { "description", "" },
+                        { "columns", new List<object>() }, { "keys", new List<object>() }
+                    };
+                }
+                d["browseKey"] = pf.Key ?? "";
+                outp.Add(d);
+            }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernEmbeditor] GetBrowseFiles: " + ex.Message); }
+            return outp;
+        }
+
+        /// <summary>
         /// Combined data payload for the Modern Data pad: the procedure's local symbols (LSP) plus the
         /// dictionary tables it references (parsed from the generated &lt;app&gt;.clw, filtered to used ones).
         /// </summary>
@@ -392,6 +439,7 @@ namespace ClarionAssistant.Terminal
             var routines = new List<Dictionary<string, object>>();
             var globals = new List<Dictionary<string, object>>();
             var otherFiles = new List<Dictionary<string, object>>();
+            var browseFiles = new List<Dictionary<string, object>>();
             try
             {
                 // Prefer the AUTHORITATIVE .txa source (declaration order + pictures + exact Clarion item
@@ -433,6 +481,8 @@ namespace ClarionAssistant.Terminal
 
                 // Other Files: the proc's [FILES][OTHERS] names paired with dictionary (.dcv) schema.
                 otherFiles = GetOtherFiles(txa);
+                // File-Browsing List Box: the proc's [FILES][PRIMARY] file + [KEY], dict-enriched.
+                browseFiles = GetBrowseFiles(txa);
             }
             catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernEmbeditor] GetPadData parse: " + ex.Message); }
 
@@ -466,6 +516,7 @@ namespace ClarionAssistant.Terminal
                 { "moduleData", moduleData },
                 { "globals", globals },
                 { "otherFiles", otherFiles },
+                { "browseFiles", browseFiles },
                 { "tables", GetDeclaredTables() },
                 { "procedures", procedures }
             };

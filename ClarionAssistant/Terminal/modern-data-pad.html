@@ -86,6 +86,7 @@
     var locals = [];
     var tables = [];
     var otherFiles = [];
+    var browseFiles = [];      // File-Browsing List Box: the proc's PRIMARY file + browse key
     var routines = [];
     var moduleData = [];
     var globals = [];
@@ -300,6 +301,11 @@
                     var pp = document.createElement('span'); pp.className = 'pre';
                     pp.textContent = 'PRE(' + ff.prefix + ')'; hdr.appendChild(pp);
                 }
+                if (ff.browseKey) {
+                    // File-Browsing List Box: show the key the primary file is browsed on (e.g. — AUT:AuSS_Key).
+                    var bk = document.createElement('span'); bk.className = 'pre';
+                    bk.textContent = '— ' + ff.browseKey; hdr.appendChild(bk);
+                }
                 if (fDet && detailOpen['d:' + fkey]) {
                     var attr = ff.attributes ? '<span class="attr">' + esc(ff.attributes) + '</span>' : '';
                     var cmt = ff.description ? '<span class="cmt">  ! ' + esc(ff.description) + '</span>' : '';
@@ -455,7 +461,9 @@
             });
         }
 
-        // Declared Tables (the program's <app>.clw file set) then Other Files — same rich renderer.
+        // File-Browsing List Box (the procedure's PRIMARY browse file + key), then Declared Tables
+        // (the program's <app>.clw file set), then Other Files — all use the same rich renderer.
+        richFileSection('browseFiles', 'File-Browsing List Box', browseFiles);
         richFileSection('tables', 'Declared Tables', tables);
         richFileSection('otherFiles', 'Other Files', otherFiles);
 
@@ -627,6 +635,7 @@
                 globals = (msg.globals || []).slice(); // declaration order from the .txa [PROGRAM][DATA]; do NOT sort
                 procedures = (msg.procedures || []).slice().sort(byName);
                 tables = (msg.tables || []).slice().sort(byName); // alphabetical, like Other Files; keep dict column order
+                browseFiles = (msg.browseFiles || []).slice(); // 0..1 primary browse file; keep as-is
                 render();
             }
         });
