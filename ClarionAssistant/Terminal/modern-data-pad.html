@@ -157,6 +157,16 @@
     function render() {
         var f = (document.getElementById('filter').value || '').trim().toLowerCase();
         var match = function (s) { return !f || (s && s.toLowerCase().indexOf(f) >= 0); };
+        // [11] Smarter filter: match against ANY of several text fields (descriptions / prompts / headers /
+        // key types), not just names. Returns true when there is no filter, exactly like match().
+        var matchAny = function () {
+            if (!f) return true;
+            for (var i = 0; i < arguments.length; i++) {
+                var s = arguments[i];
+                if (s && String(s).toLowerCase().indexOf(f) >= 0) return true;
+            }
+            return false;
+        };
         var list = document.getElementById('list');
         list.innerHTML = '';
 
@@ -247,10 +257,17 @@
             var esc = function (s) {
                 return (s == null ? '' : String(s)).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
             };
-            var colMatch = function (c) { return match(c.name) || (c.children || []).some(colMatch); };
+            // [11] Columns match on name OR description/prompt/header (recursing into GROUP children).
+            var colMatch = function (c) {
+                return matchAny(c.name, c.description, c.prompt, c.header) || (c.children || []).some(colMatch);
+            };
+            // [11] Keys match on name/description/type OR any of their component columns.
+            var keyMatch = function (k) {
+                return matchAny(k.name, k.description, k.keyType) || (k.components || []).some(colMatch);
+            };
             var fileMatch = function (ff) {
-                return match(ff.name) || (ff.columns || []).some(colMatch)
-                    || (ff.keys || []).some(function (k) { return match(k.name); });
+                return matchAny(ff.name, ff.description) || (ff.columns || []).some(colMatch)
+                    || (ff.keys || []).some(keyMatch);
             };
             if (!items.filter(fileMatch).length) return;
             if (!sectionHeader(key, label, items.length, { kind: 'file', items: items })) return;
@@ -314,14 +331,14 @@
                 if (!fOpen) return;
 
                 // Keys sub-folder
-                var keys = (ff.keys || []).filter(function (k) { return match(k.name) || !f; });
+                var keys = (ff.keys || []).filter(function (k) { return keyMatch(k); });
                 if (keys.length) {
                     var kkey = fkey + '/keys';
                     var kOpen = !localCollapsed[kkey] || !!f;
                     gutterRow('table-hdr', 'Keys', '', null, 28, true, kOpen,
                         function () { localCollapsed[kkey] = !localCollapsed[kkey]; render(); }, null);
                     if (kOpen) keys.forEach(function (k) {
-                        if (!match(k.name)) return;
+                        if (!keyMatch(k)) return;
                         var ins = ff.prefix ? ff.prefix + ':' + k.name : k.name;
                         var kdkey = 'd:' + kkey + '/' + k.name;
                         var hasKDet = !!((k.components && k.components.length) || k.description || k.keyType);
@@ -525,12 +542,12 @@
         //       Used by both Local Data and Global Data (the .txa gives both the same shape). -----
         function treeSection(key, label, items) {
             var anyMatch = function (arr) {
-                return (arr || []).some(function (it) { return match(it.name) || anyMatch(it.children); });
+                return (arr || []).some(function (it) { return matchAny(it.name, it.prompt, it.header) || anyMatch(it.children); });
             };
             var countAll = function (arr) {
                 return (arr || []).reduce(function (n, it) { return n + 1 + countAll(it.children); }, 0);
             };
-            var shown = items.filter(function (it) { return match(it.name) || anyMatch(it.children); });
+            var shown = items.filter(function (it) { return matchAny(it.name, it.prompt, it.header) || anyMatch(it.children); });
             if (!shown.length) return;
             if (!sectionHeader(key, label, countAll(items), { kind: 'tree', items: items })) return;
 
@@ -543,7 +560,7 @@
             var walk = function (arr, depth, parentKey) {
                 arr.forEach(function (it) {
                     var kids = it.children || [];
-                    if (!match(it.name) && !anyMatch(kids)) return;
+                    if (!matchAny(it.name, it.prompt, it.header) && !anyMatch(kids)) return;
                     var nkey = parentKey + '/' + (it.name || '');
                     var hasKids = kids.length > 0;
                     var open = hasKids && (!localCollapsed[nkey] || !!f);
