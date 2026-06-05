@@ -235,9 +235,20 @@ namespace ClarionAssistant.Services
         /// </summary>
         public string Resolve(string fileName, params string[] sectionNames)
         {
+            return ResolveFrom(fileName, null, sectionNames);
+        }
+
+        /// <summary>
+        /// Resolve a filename to its full path, anchoring RELATIVE redirection paths (.\ , ..\)
+        /// to <paramref name="baseDir"/> (the project/app directory) instead of the process CWD.
+        /// Clarion redirection relative paths are relative to the project being built, so callers
+        /// that know the app directory should pass it here. Absolute entries are unaffected.
+        /// Searches the specified sections in order (defaults to Common). Returns the first existing match, or null.
+        /// </summary>
+        public string ResolveFrom(string fileName, string baseDir, params string[] sectionNames)
+        {
             if (string.IsNullOrEmpty(fileName)) return null;
 
-            string ext = Path.GetExtension(fileName);
             if (sectionNames == null || sectionNames.Length == 0)
                 sectionNames = new[] { "Common" };
 
@@ -254,6 +265,9 @@ namespace ClarionAssistant.Services
                         string candidate = Path.Combine(entry.ResolvedPath, fileName);
                         try
                         {
+                            // Redirection relative paths are relative to the project dir, not the IDE's CWD.
+                            if (!Path.IsPathRooted(candidate) && !string.IsNullOrEmpty(baseDir))
+                                candidate = Path.Combine(baseDir, candidate);
                             candidate = Path.GetFullPath(candidate);
                             if (File.Exists(candidate))
                                 return candidate;

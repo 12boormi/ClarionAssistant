@@ -312,6 +312,13 @@
       </div>
     </div>
 
+    <!-- Redirection (.red) file in effect — diagnostic: shows what the selected Clarion version resolved to -->
+    <div class="config-row" style="margin-top:4px;">
+      <span class="config-label">RED</span>
+      <span id="redFile" class="codegraph-status" title=""
+            style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:Consolas,'Courier New',monospace; font-size:10px;">(not loaded)</span>
+    </div>
+
     <!-- CodeGraph status row -->
     <div class="codegraph-row">
       <span class="codegraph-label">CodeGraph</span>
@@ -425,6 +432,14 @@
       var isActive = (msg.css || '').indexOf('active') >= 0;
       el.innerHTML = (isActive ? '<span class="spinner"></span>' : '') + escapeHtml(text);
       el.className = 'codegraph-status ' + (msg.css || '');
+    }
+
+    if (msg.type === 'setRedFile') {
+      var rf = document.getElementById('redFile');
+      var t = msg.text || '(not loaded)';
+      rf.textContent = t;
+      rf.title = t;
+      rf.className = 'codegraph-status ' + (msg.css || '');
     }
 
     if (msg.type === 'setIndexButtons') {

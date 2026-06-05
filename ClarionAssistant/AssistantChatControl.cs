@@ -49,6 +49,9 @@ namespace ClarionAssistant
         private ClarionVersionInfo _versionInfo;
         private ClarionVersionConfig _currentVersionConfig;
         private RedFileService _redFileService;
+        // Last .red diagnostic shown in the header (re-pushed on HeaderReady in case LoadRedFile ran first).
+        private string _redFileDisplay = "(not loaded)";
+        private string _redFileCss = "warning";
         private DiffService _diffService;
 
         // Counter used when a tab's display name is empty, to give the
@@ -168,6 +171,7 @@ namespace ClarionAssistant
             DetectFromIde();
             StartMcpServer();
             _header.SetTheme(_isDarkTheme);
+            _header.SetRedFile(_redFileDisplay, _redFileCss); // re-push in case LoadRedFile ran before header was ready
             SyncTabBarToHeader();
             // Solutions now auto-detected from IDE, no longer shown on home page
         }
@@ -693,13 +697,40 @@ namespace ClarionAssistant
         private void LoadRedFile()
         {
             _redFileService = new RedFileService();
-            if (_currentVersionConfig == null) return;
+            if (_currentVersionConfig == null)
+            {
+                ShowRedFileInHeader("(no Clarion version resolved)", "warning");
+                return;
+            }
 
             string projectDir = null;
             if (!string.IsNullOrEmpty(_currentSlnPath))
                 projectDir = Path.GetDirectoryName(_currentSlnPath);
 
-            _redFileService.LoadForProject(projectDir, _currentVersionConfig);
+            bool ok = _redFileService.LoadForProject(projectDir, _currentVersionConfig);
+            if (ok && !string.IsNullOrEmpty(_redFileService.RedFilePath))
+            {
+                // Loaded successfully — show the actual file in effect (local project .red supersedes version-level).
+                ShowRedFileInHeader(_redFileService.RedFilePath, "");
+            }
+            else
+            {
+                // Surface WHY resolution failed so it's debuggable straight from the header.
+                string intended = _currentVersionConfig.RedFilePath;
+                string msg = string.IsNullOrEmpty(intended)
+                    ? "version '" + _currentVersionConfig.Name + "' has no RedFilePath"
+                    : intended + "  (NOT FOUND)";
+                ShowRedFileInHeader(msg, "warning");
+            }
+        }
+
+        /// <summary>Push the redirection (.red) diagnostic to the header (and remember it for re-push on ready).</summary>
+        private void ShowRedFileInHeader(string display, string css)
+        {
+            _redFileDisplay = display;
+            _redFileCss = css;
+            try { if (_header != null) _header.SetRedFile(display, css); }
+            catch { }
         }
 
         private void LoadSolutionHistory()

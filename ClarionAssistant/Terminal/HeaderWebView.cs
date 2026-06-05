@@ -178,6 +178,12 @@ namespace ClarionAssistant.Terminal
             SendMessage("{\"type\":\"setIndexStatus\",\"text\":\"" + EscapeJson(text) + "\",\"css\":\"" + EscapeJson(cssClass) + "\"}");
         }
 
+        /// <summary>Update the redirection (.red) file path shown in the header (diagnostic).</summary>
+        public void SetRedFile(string text, string cssClass = "")
+        {
+            SendMessage("{\"type\":\"setRedFile\",\"text\":\"" + EscapeJson(text) + "\",\"css\":\"" + EscapeJson(cssClass) + "\"}");
+        }
+
         /// <summary>Fired when a new log line is appended (for live updates).</summary>
         public event EventHandler<string> LogLineAppended;
 
