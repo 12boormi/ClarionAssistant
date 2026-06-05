@@ -456,7 +456,10 @@
                     wordBasedSuggestions: 'off',
                     folding: true,
                     showFoldingControls: 'always',
-                    glyphMargin: true               // bookmark markers (Ctrl+F2) live here
+                    glyphMargin: true,              // bookmark markers (Ctrl+F2) live here
+                    // Clarion prefix ':' must NOT be a word separator, so double-click (and Ctrl+Arrow)
+                    // treat Add:AddressID as ONE word — Monaco's default wordSeparators minus ':'.
+                    wordSeparators: "`~!@#$%^&*()-=+[{]}\\|;'\",.<>/?"
                 });
                 installReadOnlyGuard();
                 activeEditor = editor;         // commands target the focused pane; primary by default (#15)
@@ -1066,7 +1069,8 @@
             showFoldingControls: 'always',
             glyphMargin: true,
             wordWrap: s.wordWrap ? 'on' : 'off',
-            autoIndent: s.autoIndent ? 'full' : 'keep'
+            autoIndent: s.autoIndent ? 'full' : 'keep',
+            wordSeparators: "`~!@#$%^&*()-=+[{]}\\|;'\",.<>/?" // see primary editor: keep ':' in-word
         };
     }
 
@@ -1448,6 +1452,11 @@
         monaco.languages.setLanguageConfiguration('clarion', {
             comments: { lineComment: '!' },
             brackets: [['(', ')'], ['[', ']'], ['{', '}']],
+            // Treat the Clarion prefix separator ':' as part of a word so double-click selects
+            // the whole prefixed name (Add:AddressID), not just the field part. This is Monaco's
+            // default wordPattern with ':' removed from the separator set. '.' stays a separator
+            // so SELF.Method still selects just 'Method'.
+            wordPattern: /(-?\d*\.\d\w*)|([^\`~!@#%^&*()\-=+\[{\]}\\|;'",.<>\/?\s]+)/g,
             // Smart auto-indent on Enter (active when autoIndent='full'): indent the body of block
             // structures, outdent on END / lone '.' / CASE & IF sub-keywords. The negative lookahead
             // skips one-line forms that self-terminate with a trailing '.' (e.g. IF x THEN y.).

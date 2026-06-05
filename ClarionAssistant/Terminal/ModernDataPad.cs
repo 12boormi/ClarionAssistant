@@ -110,6 +110,14 @@ namespace ClarionAssistant
                     string name = ExtractJsonValue(json, "name");
                     var view = Terminal.ModernEmbeditorViewContent.ActiveModernView();
                     if (view != null && !string.IsNullOrEmpty(name)) view.InsertAtCursor(name);
+                    // [19] Also place the same compilable (prefixed) text on the Windows clipboard
+                    // so it can be pasted elsewhere. We're on the UI/STA thread here; guard against
+                    // the clipboard being transiently locked by another process.
+                    if (!string.IsNullOrEmpty(name))
+                    {
+                        try { System.Windows.Forms.Clipboard.SetText(name); }
+                        catch (Exception cex) { System.Diagnostics.Debug.WriteLine("[ModernDataPad] clipboard: " + cex.Message); }
+                    }
                 }
                 else if (action == "open")
                 {
