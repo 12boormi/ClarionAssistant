@@ -42,6 +42,7 @@
     .row.frow .picture { font-size: 10px; color: #0a7d3a; font-family: Consolas, 'Courier New', monospace;
         min-width: 0; text-align: left; white-space: nowrap; }
     .fgrid .detail { grid-column: 1 / -1; }
+    .tgrid .detail { grid-column: 1 / -1; }
     .row { display: flex; align-items: center; gap: 8px; padding: 3px 10px; cursor: pointer; user-select: none; }
     .row:hover { background: #e8eef7; }
     .row .kind { font-size: 10px; color: #6f42c1; min-width: 56px; }
@@ -541,6 +542,9 @@
         // ----- Tree scope: declaration order, QUEUE/GROUP expandable to nested members, picture column.
         //       Used by both Local Data and Global Data (the .txa gives both the same shape). -----
         function treeSection(key, label, items) {
+            var esc = function (s) {
+                return (s == null ? '' : String(s)).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            };
             var anyMatch = function (arr) {
                 return (arr || []).some(function (it) { return matchAny(it.name, it.prompt, it.header) || anyMatch(it.children); });
             };
@@ -564,6 +568,10 @@
                     var nkey = parentKey + '/' + (it.name || '');
                     var hasKids = kids.length > 0;
                     var open = hasKids && (!localCollapsed[nkey] || !!f);
+                    // [10] '+' detail for Local/Global rows — reveals prompt/header (the metadata not already
+                    // shown in the type/picture columns), matching the Other Files/columns detail UX.
+                    var dkey = 'd:' + nkey;
+                    var hasDet = !!(it.prompt || it.header);
                     var tip = it.name + (it.type ? '  ' + it.type : '')
                         + (it.picture ? '  ' + it.picture : '')
                         + (it.prompt ? '\nPrompt: ' + it.prompt : '')
@@ -581,6 +589,15 @@
                     tw.className = 'twisty';
                     tw.textContent = hasKids ? (open ? '▾' : '▸') : '';
                     namecell.appendChild(tw);
+                    var plus = document.createElement('span'); plus.className = 'detail-tog';
+                    if (hasDet) {
+                        plus.textContent = detailOpen[dkey] ? '−' : '+';
+                        plus.title = 'Show details';
+                        plus.addEventListener('click', function (e) {
+                            e.stopPropagation(); detailOpen[dkey] = !detailOpen[dkey]; render();
+                        });
+                    }
+                    namecell.appendChild(plus);
                     var nm = document.createElement('span');
                     nm.className = 'name'; nm.textContent = it.name;
                     namecell.appendChild(nm);
@@ -602,6 +619,18 @@
                         });
                     }
                     grid.appendChild(row);
+                    if (hasDet && detailOpen[dkey]) {
+                        var dd = [];
+                        if (it.prompt) dd.push('<span class="attr">Prompt: ' + esc(it.prompt) + '</span>');
+                        if (it.header) dd.push('<span class="attr">Header: ' + esc(it.header) + '</span>');
+                        var dv = document.createElement('div');
+                        dv.className = 'detail';
+                        // Align the detail text under the NAME: row pad (10) + namecell indent (depth*16)
+                        // + twisty (12) + gap (6) + "+" toggle (12) + gap (6) = 46 + depth*16.
+                        dv.style.paddingLeft = (46 + depth * 16) + 'px';
+                        dv.innerHTML = dd.join('<br>');
+                        grid.appendChild(dv); // spans all tracks via .tgrid .detail
+                    }
                     if (open) walk(kids, depth + 1, nkey);
                 });
             };
