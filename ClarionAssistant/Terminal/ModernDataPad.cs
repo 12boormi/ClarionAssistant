@@ -91,6 +91,13 @@ namespace ClarionAssistant
                     // Opaque JSON blob owned by the pad's JS (sectionCollapsed/localCollapsed/relExpanded/detailOpen).
                     Terminal.ModernDataPadState.Save(ExtractJsonValue(json, "state"));
                 }
+                else if (action == "openSettings")
+                {
+                    // ⚙ in the pad: open the floating native settings window (a real top-level window that can
+                    // move anywhere over the IDE, unlike an in-webview overlay clipped to this dock pane).
+                    if (_panel != null) _panel.BeginInvoke((Action)ShowSettingsWindow);
+                    else ShowSettingsWindow();
+                }
                 else if (action == "refresh")
                 {
                     // Explicit Refresh re-exports the whole-app .txa FIRST (UI thread, silent) so it picks up
@@ -239,6 +246,38 @@ namespace ClarionAssistant
             });
         }
 
+        // The floating native settings window (null when closed). Reused/activated if already open.
+        private Terminal.DataPadSettingsWindow _settingsWindow;
+
+        /// <summary>Open (or re-focus) the floating Data-pad settings window. UI thread.</summary>
+        private void ShowSettingsWindow()
+        {
+            try
+            {
+                if (_settingsWindow != null && !_settingsWindow.IsDisposed)
+                {
+                    _settingsWindow.Activate();
+                    _settingsWindow.ReseedState();   // refresh the cards from the pad's latest persisted layout
+                    return;
+                }
+                _settingsWindow = new Terminal.DataPadSettingsWindow(OnSettingsStateChanged);
+                _settingsWindow.FormClosed += (s, e) => { _settingsWindow = null; };
+                var owner = ICSharpCode.SharpDevelop.Gui.WorkbenchSingleton.Workbench as Form;
+                if (owner != null) _settingsWindow.Show(owner); else _settingsWindow.Show();
+            }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[ModernDataPad] settings window: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// The settings window changed the layout — push it to the live pad so it applies instantly. The pad
+        /// applies ONLY the section-layout fields and persists its own current state (single-writer), so the
+        /// window's stale snapshot of theme/zoom/tree-collapse/detail state can't clobber live pad state.
+        /// </summary>
+        private void OnSettingsStateChanged(string state)
+        {
+            Post(new Dictionary<string, object> { { "type", "applyLayout" }, { "state", state } });
+        }
+
         /// <summary>Send the persisted collapse/expand UI state to the pad so it can restore before first render.</summary>
         private void PostRestoreUiState()
         {
@@ -348,6 +387,7 @@ namespace ClarionAssistant
 
         public override void Dispose()
         {
+            if (_settingsWindow != null && !_settingsWindow.IsDisposed) { try { _settingsWindow.Close(); } catch { } _settingsWindow = null; }
             if (_autoTimer != null) { _autoTimer.Stop(); _autoTimer.Dispose(); _autoTimer = null; }
             if (_webView != null) { _webView.Dispose(); _webView = null; }
             if (_panel != null) { _panel.Dispose(); _panel = null; }

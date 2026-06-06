@@ -111,6 +111,7 @@
     <Compile Include="OpenModernEmbeditorPickerCommand.cs" />
     <Compile Include="ShowModernDataPadCommand.cs" />
     <Compile Include="Terminal\ModernDataPad.cs" />
+    <Compile Include="Terminal\DataPadSettingsWindow.cs" />
     <Compile Include="Terminal\ModernDataPadState.cs" />
     <Compile Include="Services\ModernEmbeditorLauncher.cs" />
     <Compile Include="Services\ModernEmbeditorSaver.cs" />

@@ -123,6 +123,64 @@
     body.dark .badge.pk { background: #5a4a1a; color: #ffd479; }
     body.dark .badge.uniq { background: #1f3a5a; color: #9accff; }
     body.dark .empty { color: #9a9ab0; }
+
+    /* ===================== Settings overlay (section customization) ===================== */
+    /* Floating, draggable popup — no dimmed backdrop. The wrapper passes pointer events through so
+       the pad list behind it stays fully interactive (live preview while you tweak the layout). */
+    .overlay { position: fixed; inset: 0; background: transparent; pointer-events: none; z-index: 50; }
+    .panel { position: fixed; top: 40px; right: 12px; pointer-events: auto;
+        background: #ffffff; color: #1f1f1f; width: min(420px, 92%);
+        max-height: 84vh; display: flex; flex-direction: column; border: 1px solid #c4c4c4;
+        border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,0.45); overflow: hidden; }
+    .panel-hdr { padding: 8px 12px; font-weight: 600; background: #eef1f4;
+        border-bottom: 1px solid #d4d4d4; display: flex; align-items: center;
+        cursor: move; user-select: none; }
+    .panel-hdr #settingsClose { margin-left: auto; cursor: pointer; font-size: 16px; color: #777; padding: 0 4px; }
+    .panel-hdr #settingsClose:hover { color: #1f1f1f; }
+    .panel-body { padding: 8px 12px; overflow-y: auto; }
+    .zone-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: #888; margin: 8px 0 4px; }
+    .zone { display: flex; flex-direction: column; gap: 4px; min-height: 6px; }
+    .hidden-zone .scard { opacity: 0.8; }
+    .scard { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border: 1px solid #d0d0d0;
+        border-radius: 5px; background: #f7f8fa; }
+    .scard.drop-target { border-color: #0a5dc2; box-shadow: 0 0 0 1px #0a5dc2 inset; }
+    .scard .handle { cursor: grab; color: #999; user-select: none; }
+    .scard .slabel { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .scard .sbtn { cursor: pointer; color: #5a5a5a; padding: 0 5px; border-radius: 3px;
+        border: 1px solid transparent; line-height: 1.5; font-size: 11px; }
+    .scard .sbtn:hover { background: #e0e6ee; color: #1f1f1f; }
+    .scard .sbtn[disabled] { opacity: 0.3; cursor: default; pointer-events: none; }
+    .panel-ftr { padding: 8px 12px; border-top: 1px solid #d4d4d4; background: #f7f8fa;
+        display: flex; align-items: center; gap: 10px; }
+    .panel-ftr label { display: flex; align-items: center; gap: 5px; cursor: pointer; flex: 1; }
+    .panel-ftr #resetSettingsBtn { font: inherit; padding: 3px 8px; border: 1px solid #bcbcbc;
+        border-radius: 4px; background: transparent; color: #0a5dc2; cursor: pointer; }
+    .panel-ftr #resetSettingsBtn:hover { background: #e4e8ee; }
+    .hint { font-size: 11px; color: #999; padding: 4px 2px; }
+
+    body.dark .panel { background: #252535; color: #d4d4d4; border-color: #3a3a4a; }
+    body.dark .panel-hdr { background: #2a2a3c; border-bottom-color: #3a3a4a; }
+    body.dark .panel-hdr #settingsClose { color: #9a9ab0; }
+    body.dark .panel-hdr #settingsClose:hover { color: #e6e6e6; }
+    body.dark .zone-label { color: #8a8aa0; }
+    body.dark .scard { background: #2a2a3c; border-color: #3a3a4a; }
+    body.dark .scard .handle { color: #7a7a90; }
+    body.dark .scard .sbtn { color: #9a9ab0; }
+    body.dark .scard .sbtn:hover { background: #3a3a52; color: #e6e6e6; }
+    body.dark .scard.drop-target { border-color: #6cb6ff; box-shadow: 0 0 0 1px #6cb6ff inset; }
+    body.dark .panel-ftr { background: #2a2a3c; border-top-color: #3a3a4a; }
+    body.dark .panel-ftr #resetSettingsBtn { border-color: #45455a; color: #6cb6ff; }
+    body.dark .panel-ftr #resetSettingsBtn:hover { background: #33334a; }
+    body.dark .hint { color: #7a7a90; }
+
+    /* ?mode=settings — the page IS the floating window's content: hide the pad chrome and let the panel
+       fill the client area. The native tool-window caption supplies the title, move, and close. */
+    body.settings-mode #bar, body.settings-mode #filter, body.settings-mode #filterClear, body.settings-mode #list { display: none !important; }
+    body.settings-mode { overflow: hidden; }
+    body.settings-mode .overlay { position: static; pointer-events: auto; }
+    body.settings-mode .panel { position: static; top: auto; right: auto; width: 100%; height: 100vh;
+        max-height: none; border: none; border-radius: 0; box-shadow: none; }
+    body.settings-mode .panel-hdr { display: none; }
 </style>
 </head>
 <body>
@@ -133,12 +191,35 @@
         <button id="fontInc" class="icon" title="Larger font">A+</button>
         <button id="themeBtn" class="icon" title="Toggle dark mode">🌙</button>
         <button id="refreshBtn" title="Refresh from the active CA Embeditor">Refresh</button>
+        <button id="settingsBtn" class="icon" title="Customize sections (reorder, hide, expand)">⚙</button>
     </div>
     <input id="filter" placeholder="Filter…" />
     <span id="filterClear" title="Clear filter (Esc)">×</span>
     <div id="list"><div class="empty">Open a procedure in the CA Embeditor, then Refresh.</div></div>
 
+    <!-- Section customization overlay (opened by the ⚙ button). Cards built dynamically in JS. -->
+    <div id="settingsOverlay" class="overlay" style="display:none;">
+        <div class="panel">
+            <div class="panel-hdr">Data Pad Settings<span id="settingsClose" title="Close">×</span></div>
+            <div class="panel-body">
+                <div class="zone-label">Visible — drag ⠿ or use ▲▼ to reorder · ▾/▸ sets default expand</div>
+                <div id="visibleZone" class="zone"></div>
+                <div class="zone-label">Hidden</div>
+                <div id="hiddenZone" class="zone hidden-zone"></div>
+            </div>
+            <div class="panel-ftr">
+                <label><input type="checkbox" id="hideEmptyChk"> Hide empty sections</label>
+                <button id="resetSettingsBtn" title="Restore the default order, show all sections">Reset to defaults</button>
+            </div>
+        </div>
+    </div>
+
 <script>
+    // When loaded as ?mode=settings the SAME page renders ONLY the settings card UI (pad chrome hidden) for
+    // the floating native settings window. It edits + persists the layout state and posts changes to its host,
+    // which pushes them live to the docked pad. This reuses the exact UI with no duplication.
+    var SETTINGS_MODE = /[?&]mode=settings/.test(location.search);
+
     var locals = [];
     var tables = [];
     var otherFiles = [];
@@ -163,6 +244,186 @@
     var darkMode = false;      // pad dark theme
     var fontScale = 1;         // pad font-size multiplier (base 12px)
     var _totalShown = 0;       // unfiltered insertable-row count, for the "N / M" filter readout
+
+    // ---- Section customization (Settings ⚙) — persisted in the same UI-state blob. ----
+    // sectionOrder is the user's display order of section ids; empty = canonical default below.
+    // sectionHidden marks ids the user moved to the "Hidden" tray. Per-section expand/collapse
+    // reuses the existing sectionCollapsed map (already persisted) so there is ONE source of truth.
+    var sectionOrder = [];          // [id, ...] in display order; [] means use DEFAULT_SECTION_ORDER
+    var sectionHidden = {};         // section id -> true when hidden from the pad
+    var hideEmptySections = true;   // when true, sections with no data are not rendered (default — matches the pad's historical behavior)
+    // sectionCollapsed is SHARED between the pad header-twisty and the settings window's ▾/▸ toggle. To avoid the
+    // settings window's stale open-time snapshot clobbering whole-section collapses the user makes in the pad
+    // while the window is open, the window forwards only a DELTA of the section ids IT toggled (applied per-key
+    // by the pad), never the full map. Reset populates it with every id (expand-all). Pad mode leaves it empty.
+    var sectionCollapsedDelta = {}; // section id -> intended collapsed bool, for the keys the settings window changed
+
+    // Canonical order MUST match the historical render order (rich file sections first, then the
+    // flat/tree scopes) so the default layout is unchanged for anyone without saved settings.
+    var DEFAULT_SECTION_ORDER = ['browseFiles', 'tables', 'otherFiles', 'locals',
+        'routines', 'localProcedures', 'moduleData', 'globals', 'procedures'];
+    var SECTION_LABELS = {
+        browseFiles: 'File-Browsing List Box', tables: 'Declared Tables', otherFiles: 'Other Files',
+        locals: 'Local Data', routines: 'Routines', localProcedures: 'Local Procedures',
+        moduleData: 'Module Data', globals: 'Global Data', procedures: 'Procedures'
+    };
+    // Raw data count per section (independent of the active filter) — drives "hide empty sections".
+    function sectionCount(id) {
+        switch (id) {
+            case 'browseFiles': return browseFiles.length;
+            case 'tables': return tables.length;
+            case 'otherFiles': return otherFiles.length;
+            case 'locals': return locals.length;
+            case 'routines': return routines.length;
+            case 'localProcedures': return localProcedures.length;
+            case 'moduleData': return moduleData.length;
+            case 'globals': return globals.length;
+            case 'procedures': return procedures.length;
+            default: return 0;
+        }
+    }
+    // Effective order: the saved order (known ids only), then any canonical ids not yet present
+    // (so new/future sections are never silently dropped from someone's saved layout).
+    function effectiveOrder() {
+        var seen = {}, order = [];
+        (sectionOrder || []).forEach(function (id) {
+            if (SECTION_LABELS[id] && !seen[id]) { seen[id] = true; order.push(id); }
+        });
+        DEFAULT_SECTION_ORDER.forEach(function (id) { if (!seen[id]) { seen[id] = true; order.push(id); } });
+        return order;
+    }
+
+    // Apply a persisted/pushed UI-state blob into the live variables (no render — callers decide). Shared by
+    // restoreUiState (pad + settings window seed). The live push (applyLayout) applies only layout fields.
+    function applyState(st) {
+        if (!st) return;
+        if (st.sectionCollapsed) sectionCollapsed = st.sectionCollapsed;
+        if (st.localCollapsed) localCollapsed = st.localCollapsed;
+        if (st.relExpanded) relExpanded = st.relExpanded;
+        if (st.detailOpen) detailOpen = st.detailOpen;
+        if (typeof st.dark === 'boolean') darkMode = st.dark;
+        if (typeof st.fontScale === 'number') fontScale = st.fontScale;
+        // Section customization (absent in older saved blobs → safe defaults).
+        if (Array.isArray(st.sectionOrder)) sectionOrder = st.sectionOrder;
+        if (st.sectionHidden) sectionHidden = st.sectionHidden;
+        if (typeof st.hideEmptySections === 'boolean') hideEmptySections = st.hideEmptySections;
+    }
+
+    // ---- Settings panel logic ----
+    // In settings mode there is no pad list to render — just refresh the cards and persist (which posts the
+    // new state to the host, which pushes it live to the docked pad). In the pad itself, re-render live.
+    function commitSettings() {
+        renderSettingsPanel();
+        if (SETTINGS_MODE) { flushSaveUiState(); }   // immediate → survives a fast close/reopen
+        else { render(); scheduleSaveUiState(); }
+    }
+    function ensureOrder() { if (!sectionOrder.length) sectionOrder = effectiveOrder(); }
+
+    function moveSection(id, dir) {   // swap with the nearest VISIBLE neighbor (skip hidden ones)
+        ensureOrder();
+        var i = sectionOrder.indexOf(id); if (i < 0) return;
+        var j = i + dir;
+        while (j >= 0 && j < sectionOrder.length && sectionHidden[sectionOrder[j]]) j += dir;
+        if (j < 0 || j >= sectionOrder.length) return;
+        var tmp = sectionOrder[i]; sectionOrder[i] = sectionOrder[j]; sectionOrder[j] = tmp;
+        commitSettings();
+    }
+    function reorderBefore(src, dest) {   // drag src so it lands just before dest
+        ensureOrder();
+        var i = sectionOrder.indexOf(src); if (i < 0) return;
+        sectionOrder.splice(i, 1);
+        var j = sectionOrder.indexOf(dest); if (j < 0) j = sectionOrder.length;
+        sectionOrder.splice(j, 0, src);
+        commitSettings();
+    }
+    function hideSection(id) { ensureOrder(); sectionHidden[id] = true; commitSettings(); }
+    function showSection(id) {   // unhide → reappears at the bottom of the visible list
+        ensureOrder(); delete sectionHidden[id];
+        var i = sectionOrder.indexOf(id); if (i >= 0) sectionOrder.splice(i, 1);
+        sectionOrder.push(id); commitSettings();
+    }
+    function toggleSectionExpand(id) {
+        sectionCollapsed[id] = !sectionCollapsed[id];
+        sectionCollapsedDelta[id] = sectionCollapsed[id];   // forward only this key's change to the pad
+        commitSettings();
+    }
+    function resetSections() {
+        sectionOrder = DEFAULT_SECTION_ORDER.slice(); sectionHidden = {};
+        sectionCollapsed = {}; hideEmptySections = true;
+        // Reset = expand every section: forward an explicit false for each known id so the pad clears its folds.
+        sectionCollapsedDelta = {};
+        DEFAULT_SECTION_ORDER.forEach(function (id) { sectionCollapsedDelta[id] = false; });
+        commitSettings();
+    }
+
+    var _dragId = null;
+    function buildSettingsCard(id, isHidden, isFirst, isLast) {
+        var card = document.createElement('div');
+        card.className = 'scard';
+        if (isHidden) {
+            var lblH = document.createElement('span'); lblH.className = 'slabel';
+            lblH.textContent = SECTION_LABELS[id] + '  (' + sectionCount(id) + ')';
+            card.appendChild(lblH);
+            var show = document.createElement('span'); show.className = 'sbtn';
+            show.textContent = 'Show'; show.title = 'Show this section again';
+            show.addEventListener('click', function () { showSection(id); });
+            card.appendChild(show);
+            return card;
+        }
+        card.draggable = true;
+        card.addEventListener('dragstart', function (e) {
+            _dragId = id; try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', id); } catch (ex) {}
+        });
+        card.addEventListener('dragover', function (e) { e.preventDefault(); try { e.dataTransfer.dropEffect = 'move'; } catch (ex) {} card.classList.add('drop-target'); });
+        card.addEventListener('dragleave', function () { card.classList.remove('drop-target'); });
+        card.addEventListener('drop', function (e) {
+            e.preventDefault(); card.classList.remove('drop-target');
+            if (_dragId && _dragId !== id) reorderBefore(_dragId, id);
+            _dragId = null;
+        });
+
+        var handle = document.createElement('span'); handle.className = 'handle'; handle.textContent = '⠿'; handle.title = 'Drag to reorder';
+        card.appendChild(handle);
+        var lbl = document.createElement('span'); lbl.className = 'slabel'; lbl.textContent = SECTION_LABELS[id];
+        card.appendChild(lbl);
+
+        var up = document.createElement('span'); up.className = 'sbtn'; up.textContent = '▲'; up.title = 'Move up';
+        if (isFirst) up.setAttribute('disabled', ''); else up.addEventListener('click', function () { moveSection(id, -1); });
+        card.appendChild(up);
+        var dn = document.createElement('span'); dn.className = 'sbtn'; dn.textContent = '▼'; dn.title = 'Move down';
+        if (isLast) dn.setAttribute('disabled', ''); else dn.addEventListener('click', function () { moveSection(id, 1); });
+        card.appendChild(dn);
+
+        var exp = document.createElement('span'); exp.className = 'sbtn';
+        var isCollapsed = !!sectionCollapsed[id];
+        exp.textContent = isCollapsed ? '▸' : '▾';
+        exp.title = isCollapsed ? 'Starts collapsed — click to start expanded' : 'Starts expanded — click to start collapsed';
+        exp.addEventListener('click', function () { toggleSectionExpand(id); });
+        card.appendChild(exp);
+
+        var hide = document.createElement('span'); hide.className = 'sbtn'; hide.textContent = 'Hide'; hide.title = 'Hide this section';
+        hide.addEventListener('click', function () { hideSection(id); });
+        card.appendChild(hide);
+        return card;
+    }
+    function renderSettingsPanel() {
+        var vis = document.getElementById('visibleZone');
+        var hid = document.getElementById('hiddenZone');
+        if (!vis || !hid) return;
+        vis.innerHTML = ''; hid.innerHTML = '';
+        var order = effectiveOrder();
+        var visIds = order.filter(function (id) { return !sectionHidden[id]; });
+        visIds.forEach(function (id, i) { vis.appendChild(buildSettingsCard(id, false, i === 0, i === visIds.length - 1)); });
+        var hidIds = order.filter(function (id) { return sectionHidden[id]; });
+        if (!hidIds.length) {
+            var none = document.createElement('div'); none.className = 'hint'; none.textContent = 'No hidden sections.'; hid.appendChild(none);
+        } else {
+            hidIds.forEach(function (id) { hid.appendChild(buildSettingsCard(id, true)); });
+        }
+        var chk = document.getElementById('hideEmptyChk'); if (chk) chk.checked = !!hideEmptySections;
+    }
+    function openSettings() { ensureOrder(); renderSettingsPanel(); document.getElementById('settingsOverlay').style.display = 'block'; }
+    function closeSettings() { document.getElementById('settingsOverlay').style.display = 'none'; }
 
     // LSP SymbolKind -> short label
     function kindLabel(k) {
@@ -286,22 +547,34 @@
 
     // Persist the collapse/expand UI state (debounced) so it survives the embeditor closing/reopening. The
     // host stores it as an opaque blob; the font zoom is persisted separately (WebView2 ZoomFactor).
+    function postUiStateNow() {
+        try {
+            postToHost({
+                action: 'saveUiState',
+                state: JSON.stringify({
+                    sectionCollapsed: sectionCollapsed, localCollapsed: localCollapsed,
+                    relExpanded: relExpanded, detailOpen: detailOpen,
+                    dark: darkMode, fontScale: fontScale,
+                    sectionOrder: sectionOrder, sectionHidden: sectionHidden,
+                    hideEmptySections: hideEmptySections,
+                    sectionCollapsedDelta: sectionCollapsedDelta
+                })
+            });
+        } catch (e) {}
+    }
     var _saveTimer = null;
     function scheduleSaveUiState() {
         if (_saveTimer) clearTimeout(_saveTimer);
-        _saveTimer = setTimeout(function () {
-            _saveTimer = null;
-            try {
-                postToHost({
-                    action: 'saveUiState',
-                    state: JSON.stringify({
-                        sectionCollapsed: sectionCollapsed, localCollapsed: localCollapsed,
-                        relExpanded: relExpanded, detailOpen: detailOpen,
-                        dark: darkMode, fontScale: fontScale
-                    })
-                });
-            } catch (e) {}
-        }, 400);
+        _saveTimer = setTimeout(function () { _saveTimer = null; postUiStateNow(); }, 400);
+    }
+    // Settings mode posts immediately (no debounce) so a fast close/reopen can't drop the last edit before it
+    // reaches the pad (and through it, disk). DRAIN the section-collapse delta once forwarded: it represents
+    // "changes since the last push", so leaving it would re-push already-delivered keys on every later action
+    // and re-clobber whole-section folds the user made in the pad after the window's earlier toggle.
+    function flushSaveUiState() {
+        if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
+        postUiStateNow();
+        if (SETTINGS_MODE) sectionCollapsedDelta = {};
     }
 
     function makeRow(cls, kindText, nameText, typeText, title, insertText, action) {
@@ -655,12 +928,6 @@
             });
         }
 
-        // File-Browsing List Box (the procedure's PRIMARY browse file + key), then Declared Tables
-        // (the program's <app>.clw file set), then Other Files — all use the same rich renderer.
-        richFileSection('browseFiles', 'File-Browsing List Box', browseFiles);
-        richFileSection('tables', 'Declared Tables', tables);
-        richFileSection('otherFiles', 'Other Files', otherFiles);
-
         // ----- Flat scopes -----
         function flatSection(key, label, items, action) {
             var shown = items.filter(function (it) { return match(it.name); });
@@ -843,13 +1110,35 @@
             walk(items, 0, key);
         }
 
-        treeSection('locals', 'Local Data', locals);
+        // Dispatch one section by id to its builder. Defined here (inside render) because the
+        // builders above are render-scoped. Rich file sections, tree scopes, and flat scopes all
+        // already early-return when the active filter hides every item.
+        function buildSection(id) {
+            switch (id) {
+                case 'browseFiles': richFileSection('browseFiles', 'File-Browsing List Box', browseFiles); break;
+                case 'tables': richFileSection('tables', 'Declared Tables', tables); break;
+                case 'otherFiles': richFileSection('otherFiles', 'Other Files', otherFiles); break;
+                case 'locals': treeSection('locals', 'Local Data', locals); break;
+                case 'routines': routineSection(routines); break;
+                case 'localProcedures': localProcedureSection(localProcedures); break;
+                case 'moduleData': flatSection('moduleData', 'Module Data', moduleData); break;
+                case 'globals': treeSection('globals', 'Global Data', globals); break;
+                case 'procedures': procedureSection(procedures); break;
+            }
+        }
 
-        routineSection(routines);
-        localProcedureSection(localProcedures);
-        flatSection('moduleData', 'Module Data', moduleData);
-        treeSection('globals', 'Global Data', globals);
-        procedureSection(procedures);
+        // Render sections in the user's customized order, skipping hidden ones. A section with no
+        // DATA is omitted while filtering or when "Hide empty sections" is on; otherwise it shows a
+        // "(0)" header so the developer can still see (and reorder/hide) it.
+        effectiveOrder().forEach(function (id) {
+            if (sectionHidden[id]) return;
+            if (sectionCount(id) === 0) {
+                if (hideEmptySections || f) return;
+                sectionHeader(id, SECTION_LABELS[id], 0);
+                return;
+            }
+            buildSection(id);
+        });
 
         if (!list.childNodes.length) {
             list.innerHTML = '<div class="empty">No data. Open a procedure in the CA Embeditor and Refresh. (Declared Tables come from the generated &lt;app&gt;.clw with live-dictionary schema; Other Files from the .txa; Local/Global Data from the app .txa.)</div>';
@@ -868,14 +1157,49 @@
     document.getElementById('fontDec').addEventListener('click', function () { fontScale -= 0.1; applyFont(); scheduleSaveUiState(); });
     document.getElementById('fontInc').addEventListener('click', function () { fontScale += 0.1; applyFont(); scheduleSaveUiState(); });
     document.getElementById('themeBtn').addEventListener('click', function () { darkMode = !darkMode; applyTheme(); scheduleSaveUiState(); });
-    // Escape: if the filter box has text, clear it; otherwise clear the multi-selection.
+    // Section customization (⚙): open/close the overlay; backdrop click closes; footer controls.
+    // ⚙ opens the floating NATIVE settings window (a real top-level window that can move anywhere over the
+    // IDE, unlike an in-webview overlay which is clipped to this pane). The host creates/show()s it.
+    document.getElementById('settingsBtn').addEventListener('click', function () { postToHost({ action: 'openSettings' }); });
+    document.getElementById('settingsClose').addEventListener('click', function () { if (SETTINGS_MODE) postToHost({ action: 'closeSettings' }); else closeSettings(); });
+    document.getElementById('settingsOverlay').addEventListener('click', function (e) { if (!SETTINGS_MODE && e.target === this) closeSettings(); });
+    document.getElementById('hideEmptyChk').addEventListener('change', function () { hideEmptySections = this.checked; commitSettings(); });
+    document.getElementById('resetSettingsBtn').addEventListener('click', resetSections);
+    // Drag the popup by its header so it can be parked aside while you preview changes live.
+    (function () {
+        var panel = document.querySelector('#settingsOverlay .panel');
+        var hdr = document.querySelector('#settingsOverlay .panel-hdr');
+        if (!panel || !hdr) return;
+        var dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
+        hdr.addEventListener('mousedown', function (e) {
+            if (e.target && e.target.id === 'settingsClose') return;   // let the × button click through
+            var r = panel.getBoundingClientRect();
+            ox = r.left; oy = r.top; sx = e.clientX; sy = e.clientY; dragging = true;
+            panel.style.left = ox + 'px'; panel.style.top = oy + 'px'; panel.style.right = 'auto';
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', function (e) {
+            if (!dragging) return;
+            var nx = ox + (e.clientX - sx), ny = oy + (e.clientY - sy);
+            nx = Math.max(0, Math.min(nx, window.innerWidth - 60));    // keep the header grabbable
+            ny = Math.max(0, Math.min(ny, window.innerHeight - 24));
+            panel.style.left = nx + 'px'; panel.style.top = ny + 'px';
+        });
+        document.addEventListener('mouseup', function () { dragging = false; });
+    })();
+    // Escape: close the settings overlay first; else clear the filter text; else the multi-selection.
     document.addEventListener('keydown', function (e) {
         if (e.key !== 'Escape') return;
+        // Only close the in-pad overlay with Escape. In settings mode the overlay IS the whole window, so
+        // closing it would blank the native window with no recovery — let the OS handle close there.
+        var ov = document.getElementById('settingsOverlay');
+        if (!SETTINGS_MODE && ov && ov.style.display !== 'none') { e.preventDefault(); closeSettings(); return; }
         var fi = document.getElementById('filter');
         var inFilter = document.activeElement === fi;
         if (inFilter && fi.value) { e.preventDefault(); fi.value = ''; render(); return; }
         if (Object.keys(selSet).length) { e.preventDefault(); selSet = {}; lastSel = null; applySel(); }
     });
+    if (SETTINGS_MODE) document.body.classList.add('settings-mode');   // hide pad chrome; show only the card UI
     applyTheme(); applyFont();   // sane defaults before the persisted UI-state restore message arrives
 
     if (window.chrome && window.chrome.webview) {
@@ -883,18 +1207,48 @@
             var msg = e.data;
             if (typeof msg === 'string') { try { msg = JSON.parse(msg); } catch (ex) { return; } }
             if (msg.type === 'restoreUiState') {
-                // Restore persisted collapse/expand state BEFORE the first data render. No render here — the
-                // setSymbols that follows does it (and reads these maps).
+                // Restore persisted collapse/expand state BEFORE the first data render. No pad render here —
+                // the setSymbols that follows does it. In settings mode there is no setSymbols, so open the
+                // card UI now that the state is loaded. openSettings() / applyTheme() run OUTSIDE the parse
+                // try so a corrupt/unparseable blob still renders the card UI (with defaults) — never a blank
+                // window with no Reset path.
                 try {
                     var st = typeof msg.state === 'string' ? JSON.parse(msg.state) : msg.state;
-                    if (st) {
-                        if (st.sectionCollapsed) sectionCollapsed = st.sectionCollapsed;
-                        if (st.localCollapsed) localCollapsed = st.localCollapsed;
-                        if (st.relExpanded) relExpanded = st.relExpanded;
-                        if (st.detailOpen) detailOpen = st.detailOpen;
-                        if (typeof st.dark === 'boolean') darkMode = st.dark;
-                        if (typeof st.fontScale === 'number') fontScale = st.fontScale;
-                        applyTheme(); applyFont();
+                    if (st) applyState(st);
+                } catch (ex) {}
+                sectionCollapsedDelta = {};   // fresh seed → drop any accumulated window delta (avoids re-applying stale toggles after reopen)
+                applyTheme(); applyFont();
+                if (SETTINGS_MODE) openSettings();
+                return;
+            }
+            if (msg.type === 'applyLayout') {
+                // Pushed by the floating settings window when the layout changed. Apply ONLY the section-layout
+                // fields — the pad keeps its own theme/zoom/tree-collapse/detail state (the settings window's
+                // copy of those is a stale open-time snapshot and must not overwrite live pad state). The pad
+                // is the single writer: render() persists the merged result. Clear the multi-selection first —
+                // its keys are render-order-scoped, so a reorder could otherwise re-bind a stale key to a
+                // different row (wrong highlight / wrong insert text).
+                try {
+                    var st2 = typeof msg.state === 'string' ? JSON.parse(msg.state) : msg.state;
+                    if (st2) {
+                        selSet = {}; lastSel = null;
+                        if (Array.isArray(st2.sectionOrder)) sectionOrder = st2.sectionOrder;
+                        if (st2.sectionHidden) sectionHidden = st2.sectionHidden;
+                        if (typeof st2.hideEmptySections === 'boolean') hideEmptySections = st2.hideEmptySections;
+                        // MERGE only the section-collapse keys the window actually toggled (a delta), so whole-
+                        // section folds the user made in the pad while the window is open are NOT clobbered by the
+                        // window's stale snapshot. sectionCollapsed keys are section ids (same space as the delta).
+                        if (st2.sectionCollapsedDelta) {
+                            for (var k in st2.sectionCollapsedDelta) {
+                                if (Object.prototype.hasOwnProperty.call(st2.sectionCollapsedDelta, k))
+                                    sectionCollapsed[k] = st2.sectionCollapsedDelta[k];
+                            }
+                        }
+                        render();
+                        // Persist IMMEDIATELY (not via render()'s 400ms debounce): the settings window may be
+                        // closed and reopened right after an edit, and its ReseedState() reads from disk — a
+                        // debounced write would let the reopen observe stale state and roll the edit back.
+                        flushSaveUiState();
                     }
                 } catch (ex) {}
                 return;

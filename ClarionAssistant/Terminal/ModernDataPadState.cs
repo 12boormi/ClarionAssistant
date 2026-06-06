@@ -16,7 +16,7 @@ namespace ClarionAssistant.Terminal
     internal static class ModernDataPadState
     {
         private static readonly string FilePath;
-        private const int MaxBytes = 512 * 1024; // hard cap so a runaway/crafted blob can't bloat the file
+        internal const int MaxBytes = 512 * 1024; // hard cap so a runaway/crafted blob can't bloat the file
 
         static ModernDataPadState()
         {
@@ -31,6 +31,11 @@ namespace ClarionAssistant.Terminal
             try
             {
                 if (!File.Exists(FilePath)) return null;
+                // Enforce the size cap on READ too (symmetric with Save). A pre-seeded/tampered/corrupt file
+                // larger than the cap is treated as absent rather than read into memory and reposted into the
+                // WebView (which would JSON.parse it) — avoids an IDE hang/OOM on pad/settings open.
+                var info = new FileInfo(FilePath);
+                if (info.Length > MaxBytes) return null;
                 string s = File.ReadAllText(FilePath, Encoding.UTF8);
                 return string.IsNullOrWhiteSpace(s) ? null : s;
             }
