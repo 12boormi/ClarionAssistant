@@ -18,6 +18,16 @@ dotnet run -c Release -- [options]
 | `--no-decompile` | off | skip ilspycmd bodies (faster) |
 | `--verify` | off | after writing, run FTS MATCH sample lookups |
 | `--limit N` | all | only the first N target assemblies (smoke test) |
+| `--html <path>` | off | also emit a self-contained, offline, searchable HTML browser (grouped by assembly → type → members) |
+
+### HTML browser
+
+```
+# generate the browser without touching the real bundled DB:
+dotnet run -c Release -- --dry-run --no-decompile --html clarion-ide-api-browser.html
+```
+
+Produces a single self-contained file (~14 MB, no external deps) with a live search box (filters by type *or* member name), kind/visibility filters, and collapsible assembly → type → member groups. Types in the decompile-flag set show a "decompiled" badge (their full C# body lives in DocGraph; query it with `query_docs`). Lazy-rendered so the browser stays responsive across 11k+ types.
 
 Typical regeneration (item 7), run with Clarion **closed**:
 
