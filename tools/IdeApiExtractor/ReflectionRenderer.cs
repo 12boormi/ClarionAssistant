@@ -110,6 +110,58 @@ namespace ClarionAssistant.Tools.IdeApiExtractor
             return chunks;
         }
 
+        /// <summary>Structured per-type description for the HTML browser. Never throws.</summary>
+        public static TypeDoc Describe(Type t, bool hasBody)
+        {
+            var d = new TypeDoc
+            {
+                asm = t.Assembly.GetName().Name,
+                asmVer = t.Assembly.GetName().Version?.ToString() ?? "?",
+                ns = t.Namespace ?? "",
+                full = t.FullName,
+                name = Readable(t),
+                kind = Kind(t),
+                vis = Vis(t.Attributes),
+                body = hasBody,
+            };
+            try
+            {
+                var bt = SafeBase(t);
+                if (bt != null && bt.FullName != "System.Object" && !t.IsEnum) d.baseType = bt.FullName;
+                foreach (var i in SafeInterfaces(t)) d.ifaces.Add(i.FullName);
+
+                if (t.IsEnum)
+                {
+                    foreach (var f in Safe(() => (IEnumerable<FieldInfo>)t.GetFields(BindingFlags.Public | BindingFlags.Static)))
+                        AddMember(d, "enum", () => { object v = null; try { v = f.GetRawConstantValue(); } catch { } return $"{f.Name} = {v}"; }, f.Name);
+                    return d;
+                }
+
+                foreach (var c in Safe(() => t.GetConstructors(Members)))
+                    AddMember(d, "ctor", () => $"[{MethodVis(c)}] .ctor({Params(c)})", ".ctor");
+                foreach (var p in Safe(() => t.GetProperties(Members)).OrderBy(p => p.Name))
+                    AddMember(d, "prop", () =>
+                    {
+                        var acc = p.GetAccessors(true).FirstOrDefault();
+                        string gs = (p.CanRead ? "get; " : "") + (p.CanWrite ? "set;" : "");
+                        return $"[{(acc != null ? MethodVis(acc) : "?")}] {T(p.PropertyType)} {p.Name} {{ {gs.Trim()} }}";
+                    }, p.Name);
+                foreach (var f in Safe(() => t.GetFields(Members)).OrderBy(f => f.Name))
+                    AddMember(d, "field", () => $"[{FieldVis(f)}]{(f.IsStatic ? " static" : "")} {T(f.FieldType)} {f.Name}", f.Name);
+                foreach (var e in Safe(() => t.GetEvents(Members)).OrderBy(e => e.Name))
+                    AddMember(d, "event", () => $"{T(e.EventHandlerType)} {e.Name}", e.Name);
+                foreach (var m in Safe(() => t.GetMethods(Members)).Where(m => !m.IsSpecialName).OrderBy(m => m.Name))
+                    AddMember(d, "method", () => $"[{MethodVis(m)}]{(m.IsStatic ? " static" : "")}{(m.IsVirtual && !m.IsFinal ? " virtual" : "")} {T(m.ReturnType)} {m.Name}({Params(m)})", m.Name);
+            }
+            catch { /* partial type — keep whatever we gathered */ }
+            return d;
+        }
+
+        static void AddMember(TypeDoc d, string kind, System.Func<string> sig, string name)
+        {
+            try { d.members.Add(new MemberDoc { k = kind, sig = sig(), name = name }); } catch { }
+        }
+
         static string BuildHeader(Type t, string asmName, string asmVer)
         {
             var sb = new StringBuilder();

@@ -17,6 +17,8 @@ namespace ClarionAssistant.Tools.IdeApiExtractor
     ///   --dry-run   write to a temp DB instead of the real one; print stats; keep the temp file path
     ///   --no-decompile  skip ilspycmd bodies (faster)
     ///   --limit N   only process the first N target assemblies (smoke testing)
+    ///   --html &lt;path&gt;  also emit a self-contained searchable HTML browser (grouped by assembly → type → members).
+    ///                 Combine with --dry-run to produce the HTML without touching the real bundled DB.
     /// </summary>
     internal static class Program
     {
@@ -27,6 +29,7 @@ namespace ClarionAssistant.Tools.IdeApiExtractor
             bool dryRun = args.Contains("--dry-run");
             bool noDecompile = args.Contains("--no-decompile");
             int limit = int.TryParse(Arg(args, "--limit"), out var l) ? l : int.MaxValue;
+            string htmlPath = Arg(args, "--html");   // also emit a self-contained searchable HTML browser
 
             string dbPath = Arg(args, "--db") ?? DefaultDbPath();
             if (dryRun)
@@ -76,6 +79,7 @@ namespace ClarionAssistant.Tools.IdeApiExtractor
 
             // ---- enumerate + render ----
             var allChunks = new List<DocChunk>();
+            var typeDocs = htmlPath != null ? new List<TypeDoc>() : null;
             int typeCount = 0, asmCount = 0, decompiled = 0;
             var seenAsm = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -100,12 +104,15 @@ namespace ClarionAssistant.Tools.IdeApiExtractor
                     try { chunks = ReflectionRenderer.Render(t).ToArray(); }
                     catch (Exception ex) { Console.Error.WriteLine($"  render fail {t.FullName}: {ex.Message}"); continue; }
 
+                    bool hasBody = false;
                     if (decompiler != null && decompiler.Available && Targets.DecompileFlag.Contains(t.FullName))
                     {
                         string body = decompiler.DecompileType(path, t.FullName);
-                        if (body != null) { chunks[0].CodeExample = body; decompiled++; }
+                        if (body != null) { chunks[0].CodeExample = body; decompiled++; hasBody = true; }
                     }
                     allChunks.AddRange(chunks);
+                    if (typeDocs != null)
+                        try { typeDocs.Add(ReflectionRenderer.Describe(t, hasBody || Targets.DecompileFlag.Contains(t.FullName))); } catch { }
                 }
                 Console.WriteLine($"  + {asm.GetName().Name,-40} types={types.Length}");
             }
@@ -134,6 +141,13 @@ namespace ClarionAssistant.Tools.IdeApiExtractor
                         foreach (var h in hits) Console.WriteLine($"      [{h.topic}] {h.cls}  ({h.heading})");
                     }
                 }
+            }
+
+            if (typeDocs != null)
+            {
+                HtmlExporter.Write(htmlPath, typeDocs, Targets.BuildStamp);
+                var size = new FileInfo(htmlPath).Length;
+                Console.WriteLine($"HTML browser written: {htmlPath} ({size / 1024.0 / 1024.0:F1} MB, {typeDocs.Count} types)");
             }
 
             Console.WriteLine(dryRun ? $"DRY RUN complete. Temp DB: {dbPath}" : "Done.");
