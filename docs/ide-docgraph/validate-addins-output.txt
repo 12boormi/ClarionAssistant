@@ -1,0 +1,16 @@
+=== Curated bin\Addins validation (item 1 scope #3) ===
+Curated set: CWBinding, ClarionParser, clarion.gen, ClarionNetWindow, ClarionNetReport
+
+========== RESOLVER PRIORITY: bin-first ==========
+  OK          CWBinding            ver=12.0.0.14000 types=101
+  OK          ClarionParser        ver=12.0.0.14000 types=590
+  OK          clarion.gen          ver=12.0.0.14000 types=591
+  OK          ClarionNetWindow     ver=4.0.0.14000 types=49
+  OK          ClarionNetReport     ver=4.0.0.14000 types=227
+
+========== RESOLVER PRIORITY: Addins-first ==========
+  OK          CWBinding            ver=12.0.0.14000 types=101
+  OK          ClarionParser        ver=12.0.0.14000 types=590
+  OK          clarion.gen          ver=12.0.0.14000 types=591
+  OK          ClarionNetWindow     ver=4.0.0.14000 types=49
+  OK          ClarionNetReport     ver=4.0.0.14000 types=227

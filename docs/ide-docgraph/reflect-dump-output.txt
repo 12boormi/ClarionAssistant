@@ -1,0 +1,23 @@
+Loaded 43 target assemblies for member enumeration.
+
+==== AGGREGATE SIZING (all 43 targets, DeclaredOnly, public+non-public) ====
+  types         : 9505  (public 5517 / non-public 3988 / nested 1290)
+  constructors  : 7293
+  methods       : 34985
+  properties    : 13502
+  fields        : 31152
+  events        : 564
+  => 1 type-chunk each = 9505 type chunks
+  => 1 member-chunk each = 87496 member chunks
+  => grand total if both = 97001 chunks
+
+==== SAMPLE TYPE DUMPS (item-6 verify targets) ====
+
+================================================================
+TYPE  ICSharpCode.SharpDevelop.Gui.IPadContent
+  kind=interface  visibility=public  assembly=ICSharpCode.SharpDevelop@2.1.0.2447
+  implements=System.IDisposable
+  prop    [public] System.Windows.Forms.Control Control { get; }
+  prop    [public] System.Boolean WantsEscape { get; }
+  method  [public] virtual System.Void RedrawContent()
+

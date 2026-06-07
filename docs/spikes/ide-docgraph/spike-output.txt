@@ -1,0 +1,133 @@
+=== MetadataLoadContext SPIKE — C:\Clarion12\bin ===
+Total DLLs scanned: 143
+
+--- TARGET-SET assemblies (managed load results) ---
+
+[SoftVelocity]  (22 dlls)
+  OK          Clarion.asl                            types=584  
+  OK          Clarion.Core                           types=36   
+  OK          Clarion.dct                            types=471  
+  OK          Clarion.Options                        types=19   
+  OK          Clarion.prj                            types=472  
+  OK          Clarion.TplHelp                        types=343  
+  OK          SoftVelocity.Clarion.ClarionCodeProvider types=549  
+  OK          SoftVelocity.Clarion.Classes           types=182  
+  OK          SoftVelocity.Clarion.CompilerMessages  types=12   
+  OK          SoftVelocity.Clarion.Design            types=46   
+  OK          SoftVelocity.Clarion.FileIO            types=73   
+  OK          SoftVelocity.Clarion.Files             types=424  
+  OK          SoftVelocity.Clarion.LINQToFileProvider types=157  
+  OK          SoftVelocity.Clarion.LINQToFileProviderNetDrv types=157  
+  OK          SoftVelocity.Clarion.Procedures        types=376  
+  OK          SoftVelocity.Clarion.Runtime.Classes   types=182  
+  OK          SoftVelocity.Clarion.Runtime.Procedures types=376  
+  OK          SoftVelocity.CW.Build.Tasks            types=9    
+  OK          SoftVelocity.Ide.Core                  types=6    
+  OK          Softvelocity.ReportConvert             types=44   
+  OK          SoftVelocity.ReportPreviewer           types=3    
+  OK          SoftVelocity.RWClasses                 types=27   
+
+[Clarion-Cla*]  (70 dlls)
+  NATIVE      ClaADO                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Claadotp                               types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaAnyScreen                           types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaAnyScreenNet                        types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Claapp                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaASC                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Claasl                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Claasm                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaBAS                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clabass                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaBTR                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clabtrs                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clacbc                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaCLA                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Claclas                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaCLP                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Claclps                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Claclw                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clacpp                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clacpxml                               types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaCR8                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaDB3                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Cladb3s                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaDB4                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Cladb4s                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Cladbrun                               types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Cladct                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Cladef                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaDF                                  types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaDOS                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Cladsi                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clafin                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaFOX                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clafoxs                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clagen                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaI2PDF                               types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaIBC                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaIde                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaLAY                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaLIT                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clalits                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clalpe                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaMEM                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clamod                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaMSS                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clamsss                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaODB                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Claodbcs                               types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaOLE                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaORA                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Claoras                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Claprj                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaPRLB                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClarionDrv                             types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClarionDrvRW                           types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClarionFL                              types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaRUN                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaSCA                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clascas                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaSQA                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clasqas                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clastat                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clatple                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clatpls                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      ClaTPS                                 types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Clatpss                                types=0      :: no managed metadata (Win32 PE)
+  NATIVE      Claxmlty                               types=0      :: no managed metadata (Win32 PE)
+  OK          Claprnet                               types=35   
+  OK          ClarionDL                              types=25   
+  OK          ClaRunExt                              types=290  
+
+[SharpDevelop]  (8 dlls)
+  OK          ICSharpCode.Build.Tasks                types=22   
+  OK          ICSharpCode.Core                       types=129  
+  OK          ICSharpCode.NRefactory                 types=211  
+  OK          ICSharpCode.SharpDevelop               types=1088 
+  OK          ICSharpCode.SharpDevelop.Dom           types=177  
+  OK          ICSharpCode.SharpDevelop.Sda           types=11   
+  OK          ICSharpCode.SharpDevelop.Widgets       types=53   
+  OK          ICSharpCode.TextEditor                 types=248  
+
+[SharpDevelop-dep]  (6 dlls)
+  NATIVE      cntbuilder                             types=0      :: no managed metadata (Win32 PE)
+  OK          Aga.Controls                           types=106  
+  OK          Mono.Cecil                             types=410  
+  OK          Skybound.VisualTips                    types=73   
+  OK          SmartPropertyGrid                      types=290  
+  OK          WeifenLuo.WinFormsUI.Docking           types=231  
+
+--- SUMMARY BY STATUS (target set only) ---
+  NATIVE     : 68
+  OK         : 38
+  TOTAL target : 106
+  managed-OK   : 38
+  native       : 68
+  load-fail    : 0
+
+--- DEPENDENCY-RESOLUTION FAILURES (any partial loads) ---
+  NONE — all managed assemblies fully resolved their dependencies.
+
+--- THIRD-PARTY / EXCLUDED (for reference) ---
+  ThirdParty: 31 dlls (30 managed, 1 native)
+  Other: 6 dlls (0 managed, 6 native)
