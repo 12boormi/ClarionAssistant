@@ -1,0 +1,15 @@
+=== 11 ADDITIONS — load validation + canonical paths ===
+  OK  DataDictionaryEditor                 ver=12.0.0.14000   types=296    Addins\BackendBindings\ClarionBinding\Common\DataDictionaryEditor.dll
+  OK  DataDictionaryFile                   ver=12.0.0.14000   types=205    Addins\BackendBindings\ClarionBinding\Common\DataDictionaryFile.dll
+  OK  DataDictionary                       ver=12.0.0.14000   types=175    Addins\BackendBindings\ClarionBinding\Common\DataDictionary.dll
+  OK  SoftVelocity.DataDictionary.Design   ver=12.0.0.14000   types=143    Addins\BackendBindings\ClarionBinding\Common\SoftVelocity.DataDictionary.Design.dll
+  OK  DictionaryDiagram                    ver=12.0.0.14000   types=30     Addins\BackendBindings\ClarionBinding\Common\DictionaryDiagram.dll
+  OK  Generator                            ver=12.0.0.14000   types=192    Addins\BackendBindings\ClarionBinding\Common\Generator.dll
+  OK  CommonSources                        ver=12.0.0.14000   types=399    Addins\BackendBindings\ClarionBinding\Common\CommonSources.dll
+  OK  CommonControl                        ver=4.0.0.14000    types=322    Addins\BackendBindings\ClarionBinding\Common\CommonControl.dll
+  OK  ListControl                          ver=4.0.0.14000    types=301    Addins\BackendBindings\ClarionBinding\Common\ListControl.dll
+  OK  Browser                              ver=12.0.0.14000   types=45     Addins\BackendBindings\ClarionBinding\Common\Browser.dll
+  OK  WindowPreviewer                      ver=12.0.0.14000   types=23     Addins\BackendBindings\ClarionBinding\Common\WindowPreviewer.dll
+
+Additions total types: 2131
+(43 core+curated types were 9,505 → expanded grand total ≈ 11636 types)
