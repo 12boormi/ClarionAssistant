@@ -32,9 +32,14 @@ namespace ClarionAssistant.Services
         public sealed class Result
         {
             public bool Ok;
+            // True when the operation actually mutated the app (so the caller should refresh). Defaults true so
+            // Add/Edit keep their proven refresh-on-return behavior; only a no-op (e.g. a cancelled delete) sets
+            // it false so the host skips the whole-app .txa export on an operation that changed nothing.
+            public bool Committed = true;
             public string Message;
             public static Result Fail(string m) { return new Result { Ok = false, Message = m }; }
             public static Result Done(string m) { return new Result { Ok = true, Message = m }; }
+            public static Result NoOp(string m) { return new Result { Ok = true, Committed = false, Message = m }; }
         }
 
         /// <param name="scope">"local" (current procedure) or "global". Validated — anything else fails closed.</param>
@@ -133,6 +138,211 @@ namespace ClarionAssistant.Services
             {
                 return Result.Fail("Add Variable failed: " + (ex.InnerException?.Message ?? ex.Message));
             }
+        }
+
+        /// <summary>
+        /// Edit an existing Local/Global variable: open Clarion's FieldForm for the named field. Clarion picks
+        /// the mode itself - ChangeRecord (editable) for app-declared fields (DataStorageLocation.Application=0)
+        /// or ViewRecord (read-only) for dictionary/template-derived fields (Location != 0) - so we don't gate it.
+        /// Proven by the ticket-0aa0ec42 probe: resolve the DDField from the scope's FieldList (the live model,
+        /// NOT the virtual tree nodes) and invoke tree.ShowCurrentItem(ddField, indirect:true). indirect:true skips
+        /// the passupItemChosen guard so it always opens the form rather than navigating. Mutation only - the caller
+        /// (Modern Data pad) refreshes via ScheduleAddRefresh, exactly like Add. UI thread (FieldForm is modal).
+        /// </summary>
+        /// <param name="path">Structural path to the field through the scope's FieldList ("/"-delimited:
+        /// "Member" for a top-level var, "Group/Member" for a nested one). Resolved unambiguously by descending
+        /// one container per segment (sibling names are unique); fails closed on a zero/ambiguous match.</param>
+        public static Result EditVariable(string scope, string path, string expectedProcedure = null)
+        {
+            try
+            {
+                object tree, ddField; Result error;
+                if (!ResolveTargetField(scope, path, expectedProcedure, out tree, out ddField, out _, out error)) return error;
+
+                // tree.ShowCurrentItem(ddField, indirect:true): 2 params, 2nd bool, 1st accepts the DDField.
+                var show = FindMethodArgs(tree, "ShowCurrentItem",
+                    p => p.Length == 2 && p[1].ParameterType == typeof(bool) && p[0].ParameterType.IsInstanceOfType(ddField));
+                if (show == null) return Result.Fail("Couldn't find Clarion's edit-field command.");
+
+                show.Invoke(tree, new object[] { ddField, true });   // modal FieldForm; Clarion persists on OK
+                return Result.Done("Opened " + LeafName(path) + " for editing.");
+            }
+            catch (Exception ex)
+            {
+                return Result.Fail("Edit Variable failed: " + (ex.InnerException?.Message ?? ex.Message));
+            }
+        }
+
+        /// <summary>
+        /// Delete an existing Local/Global variable. Resolves the DDField from the scope's FieldList and invokes
+        /// tree.GetDetails(ddField).DeleteItem() - GetDetails(DataDictionaryItem) returns an EntityBrowserDetails
+        /// whose Item == the field; DeleteItem() honors CanHaveDelete, computes Item.RemoveSideEffects(...) and pops
+        /// Clarion's own ConfirmDeletionForm (or a Yes/No MessageBox) before removing. We ref-check details.Item ==
+        /// ddField and refuse on mismatch, so a wrong resolution can never delete the wrong field. Mutation only -
+        /// the caller refreshes via ScheduleAddRefresh. UI thread (the confirm dialog is modal).
+        /// </summary>
+        /// <param name="path">Structural path to the field (see EditVariable) — resolved unambiguously, fail
+        /// closed on a zero/ambiguous match so a duplicate label inside a GROUP/QUEUE can't delete the wrong field.</param>
+        public static Result DeleteVariable(string scope, string path, string expectedProcedure = null)
+        {
+            try
+            {
+                object tree, ddField, fieldList; Result error;
+                if (!ResolveTargetField(scope, path, expectedProcedure, out tree, out ddField, out fieldList, out error)) return error;
+
+                // tree.GetDetails(DataDictionaryItem): the 1-arg overload that accepts the DDField (the other 1-arg
+                // overload takes a TreeNodeAdv, which a DDField is NOT an instance of).
+                var getDetails = FindMethodArgs(tree, "GetDetails",
+                    p => p.Length == 1 && p[0].ParameterType.IsInstanceOfType(ddField));
+                if (getDetails == null) return Result.Fail("Couldn't resolve the field editor context for " + LeafName(path) + ".");
+                var details = getDetails.Invoke(tree, new object[] { ddField });
+                if (details == null) return Result.Fail("Couldn't resolve the field editor context for " + LeafName(path) + ".");
+
+                // HARD guard: only delete when the resolved details actually targets our field.
+                if (!ReferenceEquals(GetProp(details, "Item"), ddField))
+                    return Result.Fail("Internal mismatch resolving '" + LeafName(path) + "' - delete refused to avoid removing the wrong field.");
+                if ((GetProp(details, "CanHaveDelete") as bool?) == false)
+                    return Result.Fail("'" + LeafName(path) + "' can't be deleted.");
+
+                var deleteItem = FindMethodArgs(details, "DeleteItem", p => p.Length == 0);
+                if (deleteItem == null) return Result.Fail("Couldn't find Clarion's delete-field command.");
+
+                deleteItem.Invoke(details, null);   // modal confirm dialog; Clarion removes on confirm
+
+                // Honest postcondition: DeleteItem() returns whether or not the user confirmed Clarion's modal, so
+                // re-resolve the same path against the live model — no longer resolvable == actually deleted. This
+                // avoids depending on whether a removed field's Parent is nulled (which we can't assume).
+                bool removed = FindFieldByPath(fieldList, SplitPath(path)) == null;
+                return removed ? Result.Done("Deleted " + LeafName(path) + ".")
+                               : Result.NoOp("Delete cancelled for " + LeafName(path) + ".");   // no mutation → no refresh
+            }
+            catch (Exception ex)
+            {
+                return Result.Fail("Delete Variable failed: " + (ex.InnerException?.Message ?? ex.Message));
+            }
+        }
+
+        /// <summary>
+        /// Shared resolution for Edit/Delete: scope-validate, resolve pad/tree/scope node, apply the LOCAL
+        /// wrong-procedure fail-closed guard (same as AddVariable), warm CurrentDetails by selecting the scope
+        /// node, reject a read-only app, then resolve the named DDField from the scope's FieldList (the live model).
+        /// </summary>
+        private static bool ResolveTargetField(string scope, string path, string expectedProcedure,
+            out object tree, out object ddField, out object fieldList, out Result error)
+        {
+            tree = null; ddField = null; fieldList = null; error = null;
+
+            string s = (scope ?? "").Trim().ToLowerInvariant();
+            if (s != "local" && s != "global") { error = Result.Fail("Unknown variable scope '" + scope + "'."); return false; }
+            bool wantLocal = s == "local";
+            string scopeName = wantLocal ? "Local" : "Global";
+            var segments = SplitPath(path);
+            if (segments.Length == 0) { error = Result.Fail("No variable supplied."); return false; }
+
+            var pad = FindFileSchemaPad();
+            if (pad == null) { error = Result.Fail("Clarion's Data / Tables pad isn't available. Open an application first."); return false; }
+            tree = FindTree(pad);
+            if (tree == null) { error = Result.Fail("Couldn't locate the Data / Tables tree."); return false; }
+
+            var node = FindScopeNode(tree, wantLocal);
+            if (node == null) { error = Result.Fail(wantLocal
+                ? "No Local Data node found - open or focus a procedure first."
+                : "No Global Data node found in the current application."); return false; }
+
+            // Same fail-closed LOCAL guard as AddVariable: the native tree's Local Data node may belong to a
+            // different procedure than the one our pad is showing - editing/deleting blindly would hit the wrong
+            // procedure. Refuse on mismatch, and refuse when the caller can't name the on-screen procedure.
+            if (wantLocal)
+            {
+                if (string.IsNullOrEmpty(expectedProcedure))
+                { error = Result.Fail("No active procedure for a Local variable - open or focus a procedure first."); return false; }
+                string nodeProc = LocalNodeProcedure(node);
+                if (!string.Equals(nodeProc, expectedProcedure, StringComparison.OrdinalIgnoreCase))
+                { error = Result.Fail("Clarion's Data pad is showing Local Data for '" + (nodeProc ?? "?")
+                    + "', not '" + expectedProcedure + "'. Open/focus that procedure in Clarion, then try again."); return false; }
+            }
+
+            // Warm tree.CurrentDetails by selecting the scope node (the proven Add spine).
+            TrySetProp(tree, "SelectedNode", node);
+            TrySetProp(tree, "CurrentNode", node);
+            Application.DoEvents();
+
+            var list = GetProp(GetProp(node, "Tag"), "List");
+            if (list == null) { error = Result.Fail("Couldn't read the " + scopeName + " data fields."); return false; }
+            fieldList = list;
+
+            // Guard: read-only dictionary/app.
+            var dd = GetProp(list, "DataDictionary");
+            if (dd != null && (GetProp(dd, "ReadOnly") as bool?) == true)
+            { error = Result.Fail("The application/dictionary is read-only."); return false; }
+
+            ddField = FindFieldByPath(list, segments);
+            if (ddField == null)
+            { error = Result.Fail("Couldn't uniquely resolve '" + path + "' in " + scopeName + " data (not found, or an ambiguous name)."); return false; }
+            return true;
+        }
+
+        // Resolve a DDField by its STRUCTURAL PATH through the FieldList, descending one container per segment.
+        // Names are unique among SIBLINGS within a Clarion structure (the compiler enforces it), so each step is
+        // unambiguous; we FAIL CLOSED (return null) on a zero or multiple match at any level rather than guessing —
+        // critical for the destructive delete path. A flat name match across nested GROUP/QUEUE members would NOT
+        // be safe, because members in *different* containers can share a label.
+        private static object FindFieldByPath(object fieldList, string[] segments)
+        {
+            object container = fieldList;
+            for (int i = 0; i < segments.Length; i++)
+            {
+                var fields = GetProp(container, "Fields") as IEnumerable;
+                if (fields == null) return null;
+                object match = null; int count = 0;
+                foreach (var f in fields)
+                {
+                    if (f == null) continue;
+                    if (NameMatches(f, segments[i])) { match = f; count++; }
+                }
+                if (count != 1) return null;                  // 0 or ambiguous → fail closed
+                if (i == segments.Length - 1) return match;   // last segment = the target field
+                container = match;                            // descend into the container
+            }
+            return null;
+        }
+
+        private static bool NameMatches(object field, string name)
+        {
+            return string.Equals(GetProp(field, "Name")?.ToString(), name, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(GetProp(field, "CodeName")?.ToString(), name, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Split a "/"-delimited structural path ("Group/Member") into trimmed, non-empty segments. Clarion
+        // identifiers contain no "/", so the delimiter is unambiguous.
+        private static string[] SplitPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return new string[0];
+            var list = new List<string>();
+            foreach (var r in path.Split('/')) { var t = (r ?? "").Trim(); if (t.Length > 0) list.Add(t); }
+            return list.ToArray();
+        }
+
+        private static string LeafName(string path)
+        {
+            var segs = SplitPath(path);
+            return segs.Length == 0 ? "(variable)" : segs[segs.Length - 1];
+        }
+
+        // Find a method by name whose parameter list satisfies 'match' (lets us bind to ShowCurrentItem(item,bool)
+        // / GetDetails(item) without referencing the SoftVelocity parameter types at compile time).
+        private static MethodInfo FindMethodArgs(object obj, string name, Func<ParameterInfo[], bool> match)
+        {
+            if (obj == null) return null;
+            for (var t = obj.GetType(); t != null && t != typeof(object); t = t.BaseType)
+            {
+                foreach (var m in t.GetMethods(AllInstance | BindingFlags.DeclaredOnly))
+                {
+                    if (!string.Equals(m.Name, name, StringComparison.Ordinal)) continue;
+                    if (match(m.GetParameters())) return m;
+                }
+            }
+            return null;
         }
 
         private static string DescribeScope(object addParent, string scopeName)
