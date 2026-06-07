@@ -181,36 +181,45 @@ namespace ClarionAssistant
                     // FieldForm is modal) and we move focus to the main IDE first — same re-entrancy/native-focus
                     // rule as 'open'/'refresh'. Scope = "local" (current procedure) | "global".
                     string scope = ExtractJsonValue(json, "scope");
-                    if (_panel != null)
+                    // Single-flight: ignore a re-entrant ＋Add while one is already running. The same flag also
+                    // suppresses the 750ms auto-tick while Clarion's modal FieldForm is open (see OnAutoRefreshTick)
+                    // so a background .txa export can't churn the FileSchema tree the modal is editing.
+                    if (_panel != null && !_addVarInProgress)
                     {
+                        _addVarInProgress = true;
                         _panel.BeginInvoke((Action)(() =>
                         {
+                            Services.FileSchemaVariableInserter.Result r = null;
                             try
                             {
-                                var mainForm = ICSharpCode.SharpDevelop.Gui.WorkbenchSingleton.Workbench as Form;
-                                if (mainForm != null) { mainForm.Activate(); Application.DoEvents(); }
-                            }
-                            catch { }
-
-                            Services.FileSchemaVariableInserter.Result r;
-                            try { r = Services.FileSchemaVariableInserter.AddVariable(scope); }
-                            catch (Exception ex) { r = Services.FileSchemaVariableInserter.Result.Fail(ex.Message); }
-
-                            // On failure, tell the developer why nothing happened (pad closed, read-only, etc.).
-                            // On success the FieldForm itself was the feedback.
-                            if (r != null && !r.Ok)
-                            {
-                                try { MessageBox.Show(r.Message, "Add Variable", MessageBoxButtons.OK, MessageBoxIcon.Information); }
+                                try
+                                {
+                                    var mainForm = ICSharpCode.SharpDevelop.Gui.WorkbenchSingleton.Workbench as Form;
+                                    if (mainForm != null) { mainForm.Activate(); Application.DoEvents(); }
+                                }
                                 catch { }
-                            }
 
-                            // Re-export the whole-app .txa + re-parse so the newly-added Local/Global var shows in
-                            // our pad without a manual Refresh. Must be DEFERRED: calling RefreshPadSources()
-                            // synchronously here (right after the modal FieldForm's ShowDialog unwinds) exports a
-                            // .txa that doesn't yet reflect the just-committed field — Clarion finalizes it a turn
-                            // later (which is why the manual Refresh button, on its own settled turn, worked). Run
-                            // it on later turns, twice, to absorb variable settle time on larger apps.
-                            ScheduleAddRefresh();
+                                // Pass the procedure our pad is currently showing so a LOCAL add fails closed if
+                                // the native Data/Tables tree is on a different procedure (wrong-procedure guard).
+                                try { r = Services.FileSchemaVariableInserter.AddVariable(scope, _lastShownProc); }
+                                catch (Exception ex) { r = Services.FileSchemaVariableInserter.Result.Fail(ex.Message); }
+
+                                // On failure, tell the developer why nothing happened (pad closed, read-only,
+                                // wrong-procedure, etc.). On success the FieldForm itself was the feedback.
+                                if (r != null && !r.Ok)
+                                {
+                                    try { MessageBox.Show(r.Message, "Add Variable", MessageBoxButtons.OK, MessageBoxIcon.Information); }
+                                    catch { }
+                                }
+                            }
+                            finally { _addVarInProgress = false; }
+
+                            // Re-export the whole-app .txa + re-parse so the newly-added var shows in our pad
+                            // without a manual Refresh — ONLY after a confirmed successful add (skip on
+                            // failure/cancel). Deferred because calling RefreshPadSources() synchronously right
+                            // after the modal unwinds exports a .txa that doesn't yet reflect the just-committed
+                            // field (Clarion finalizes it a turn later). Coalesced + lifecycle-tracked.
+                            if (r != null && r.Ok) ScheduleAddRefresh();
                         }));
                     }
                 }
@@ -287,16 +296,31 @@ namespace ClarionAssistant
             });
         }
 
+        // Outstanding deferred add-refresh timers, tracked so Dispose() can stop them and so repeated ＋Add
+        // clicks coalesce (a new schedule drops the previous passes) instead of stacking whole-app exports.
+        private readonly System.Collections.Generic.List<Timer> _addRefreshTimers = new System.Collections.Generic.List<Timer>();
+
+        // Single-flight guard for ＋Add (UI thread only): true from the moment a ＋Add is accepted until its
+        // flow (incl. the modal FieldForm) completes. Blocks re-entrant adds AND the auto-refresh tick.
+        private volatile bool _addVarInProgress;
+
         /// <summary>
         /// After a "＋ Add" commits a variable through Clarion's FieldForm, re-export the whole-app .txa and
         /// re-render — on LATER UI turns (Clarion finalizes the new field a turn after the modal closes, so an
-        /// immediate export misses it). Fires twice (short + longer) to absorb settle time on larger apps; each
-        /// pass is a one-shot WinForms Timer so it runs on a clean, non-reentrant message-loop turn.
+        /// immediate export misses it). Two passes (short + longer) absorb settle time on larger apps. Coalesces:
+        /// any pending passes from a prior add are cancelled first, so rapid adds don't stack exports.
         /// </summary>
         private void ScheduleAddRefresh()
         {
+            ClearAddRefreshTimers();
             DeferRefresh(500);
             DeferRefresh(1500);
+        }
+
+        private void ClearAddRefreshTimers()
+        {
+            foreach (var t in _addRefreshTimers) { try { t.Stop(); t.Dispose(); } catch { } }
+            _addRefreshTimers.Clear();
         }
 
         private void DeferRefresh(int ms)
@@ -304,10 +328,12 @@ namespace ClarionAssistant
             var t = new Timer { Interval = ms };
             t.Tick += (s, e) =>
             {
-                t.Stop(); t.Dispose();
+                try { t.Stop(); _addRefreshTimers.Remove(t); t.Dispose(); } catch { }
+                if (_panel == null || _panel.IsDisposed) return;   // pad torn down — don't touch the IDE
                 try { Terminal.ModernEmbeditorViewContent.RefreshPadSources(); } catch { }
                 Refresh();
             };
+            _addRefreshTimers.Add(t);
             t.Start();
         }
 
@@ -414,6 +440,7 @@ namespace ClarionAssistant
         private void OnAutoRefreshTick(object sender, EventArgs e)
         {
             if (Services.ModernEmbeditorLauncher.IsBusy) return;  // never touch the IDE mid open/save
+            if (_addVarInProgress) return;  // never run a .txa export while Clarion's add-variable modal is open
             string proc;
             bool isNative = false;
             try
@@ -452,6 +479,7 @@ namespace ClarionAssistant
 
         public override void Dispose()
         {
+            ClearAddRefreshTimers();
             if (_settingsWindow != null && !_settingsWindow.IsDisposed) { try { _settingsWindow.Close(); } catch { } _settingsWindow = null; }
             if (_autoTimer != null) { _autoTimer.Stop(); _autoTimer.Dispose(); _autoTimer = null; }
             if (_webView != null) { _webView.Dispose(); _webView = null; }

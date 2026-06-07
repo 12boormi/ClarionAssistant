@@ -37,10 +37,18 @@ namespace ClarionAssistant.Services
             public static Result Done(string m) { return new Result { Ok = true, Message = m }; }
         }
 
-        /// <param name="scope">"local" (current procedure) or "global".</param>
-        public static Result AddVariable(string scope)
+        /// <param name="scope">"local" (current procedure) or "global". Validated — anything else fails closed.</param>
+        /// <param name="expectedProcedure">For LOCAL scope: the procedure the caller (Modern Data pad) is
+        /// currently showing. The add is REFUSED unless the native tree's Local Data node belongs to this same
+        /// procedure — the docked Clarion Data/Tables tree can be showing a different procedure than our pad,
+        /// and a blind add would silently land in the wrong procedure. Ignored for global scope.</param>
+        public static Result AddVariable(string scope, string expectedProcedure = null)
         {
-            bool wantLocal = string.Equals((scope ?? "").Trim(), "local", StringComparison.OrdinalIgnoreCase);
+            // Fail closed on any unexpected scope — never silently coerce an unknown value to Global.
+            string s = (scope ?? "").Trim().ToLowerInvariant();
+            if (s != "local" && s != "global")
+                return Result.Fail("Unknown variable scope '" + scope + "'.");
+            bool wantLocal = s == "local";
             string scopeName = wantLocal ? "Local" : "Global";
             try
             {
@@ -57,6 +65,17 @@ namespace ClarionAssistant.Services
                     return Result.Fail(wantLocal
                         ? "No Local Data node found — open or focus a procedure first."
                         : "No Global Data node found in the current application.");
+
+                // FAIL CLOSED on procedure mismatch for LOCAL: the native tree's Local Data node belongs to one
+                // procedure, which may differ from the one our pad is showing (native + Modern focus diverge).
+                // Adding blindly would land the variable in the WRONG procedure with no warning.
+                if (wantLocal && !string.IsNullOrEmpty(expectedProcedure))
+                {
+                    string nodeProc = LocalNodeProcedure(node);
+                    if (!string.Equals(nodeProc, expectedProcedure, StringComparison.OrdinalIgnoreCase))
+                        return Result.Fail("Clarion's Data pad is showing Local Data for '" + (nodeProc ?? "?")
+                            + "', not '" + expectedProcedure + "'. Open/focus that procedure in Clarion, then try again.");
+                }
 
                 // Select the scope node so the tree builds CurrentDetails / AddParent for that FieldList.
                 TrySetProp(tree, "SelectedNode", node);
@@ -76,10 +95,17 @@ namespace ClarionAssistant.Services
                 if (dd != null && (GetProp(dd, "ReadOnly") as bool?) == true)
                     return Result.Fail("The application/dictionary is read-only.");
 
-                // Guard: confirm we targeted the requested scope (IsLocal flag on the FieldList).
+                // Guard: confirm we targeted the requested scope (IsLocal flag on the FieldList). For LOCAL we
+                // require a definite IsLocal==true (a null/indeterminate flag fails closed rather than risk a
+                // wrong-scope add); for GLOBAL we only reject a definite IsLocal==true.
                 var isLocal = GetProp(addParent, "IsLocal") as bool?;
-                if (isLocal.HasValue && isLocal.Value != wantLocal)
-                    return Result.Fail("Resolved the wrong scope (expected " + scopeName + "). Try again from the correct section.");
+                if (wantLocal)
+                {
+                    if (isLocal != true)
+                        return Result.Fail("Couldn't confirm the target is Local data — refused to avoid a wrong-scope add.");
+                }
+                else if (isLocal == true)
+                    return Result.Fail("Resolved Local data when Global was requested.");
 
                 // Fire Clarion's own add flow — pops the modal FieldForm; user fills + OKs (or cancels).
                 var handler = FindMethod(details, "AddItemEventHandler", new[] { typeof(object), typeof(EventArgs) });
@@ -182,6 +208,19 @@ namespace ClarionAssistant.Services
         private static IEnumerable Children(object node)
         {
             return (GetProp(node, "Children") as IEnumerable) ?? (GetProp(node, "Nodes") as IEnumerable) ?? new object[0];
+        }
+
+        // A Local Data node's Tag carries Label = "Local Data &lt;procedure&gt;". Extract &lt;procedure&gt; so the
+        // caller can confirm the native tree is showing the same procedure our pad is.
+        private static string LocalNodeProcedure(object node)
+        {
+            var tag = GetProp(node, "Tag");
+            var label = GetProp(tag, "Label")?.ToString();
+            if (string.IsNullOrEmpty(label)) return null;
+            const string prefix = "Local Data ";
+            return label.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                ? label.Substring(prefix.Length).Trim()
+                : label.Trim();
         }
 
         private static ToolStripItem FindAddMenuItem(object tree)
