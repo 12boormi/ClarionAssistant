@@ -79,13 +79,17 @@ namespace ClarionAssistant
         /// designer merges; <paramref name="onClosed"/> fires once when the scratch tab closes (arg = final
         /// buffer, or null if nothing changed since the last onBufferChanged).
         /// </summary>
-        public static string Open(string structureText, string label, bool isWindow, Control uiInvoker,
+        /// <param name="isWindowDesigner">true = window designer, false = report designer.</param>
+        /// <param name="isWindowWindow">within windows: true = plain WINDOW, false = APPLICATION/MDI frame.
+        /// Ignored-by-convention for reports (pass false).</param>
+        public static string Open(string structureText, string label, bool isWindowDesigner, bool isWindowWindow, Control uiInvoker,
             Action<string> onBufferChanged, Action<string> onClosed)
         {
             if (IsActive) return "A structure designer is already open — close its tab first.";
             var log = new StringBuilder();
             void L(string s) { log.AppendLine(s); }
-            L("=== StructureDesignerService.Open — " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  label=" + label + " isWindow=" + isWindow + " ===");
+            L("=== StructureDesignerService.Open — " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  label=" + label
+                + " isWindowDesigner=" + isWindowDesigner + " isWindowWindow=" + isWindowWindow + " ===");
             try
             {
                 // 1) Scratch .clw. The file name becomes the tab title — use the structure's label.
@@ -120,7 +124,7 @@ namespace ClarionAssistant
                 // 3) Deferred race-free build (the caller's turn is settled, but file-open/attach work from
                 //    step 2 may still have queued messages — same deferral the spike proved).
                 Control invoker = (GetTextEditorControl(view) as Control) ?? uiInvoker;
-                Action build = () => DeferredBuild(session, designerView, isWindow, L, log);
+                Action build = () => DeferredBuild(session, designerView, isWindowDesigner, isWindowWindow, L, log);
                 if (invoker != null && invoker.IsHandleCreated) invoker.BeginInvoke(build);
                 else build();
                 return null;
@@ -134,7 +138,7 @@ namespace ClarionAssistant
             }
         }
 
-        private static void DeferredBuild(Session session, object designerView, bool isWindow, Action<string> L, StringBuilder log)
+        private static void DeferredBuild(Session session, object designerView, bool isWindowDesigner, bool isWindowWindow, Action<string> L, StringBuilder log)
         {
             try
             {
@@ -148,22 +152,29 @@ namespace ClarionAssistant
                 ResetField(designerView, "m_largeDesignAreaPanel", null, L);
                 ResetField(designerView, "m_rcd", null, L);
                 ResetField(designerView, "m_cr", null, L);
-                ResetField(designerView, "m_isWindowWindow", isWindow, L);
+                ResetField(designerView, "m_isWindowWindow", isWindowWindow, L);
 
                 // Parse ladder (spike v6): editor ParseStructure → CommonIDEParser isWin pin → static raw.
-                string wantType = isWindow ? "WindowDeclaration" : "ReportDeclaration";
+                // Window designer accepts WindowDeclaration or ApplicationDeclaration (an MDI frame's
+                // APPLICATION parses as its own node type); a bare ReportDeclaration reaching window code
+                // is the v5 failure mode. Report designer wants exactly ReportDeclaration.
+                Func<object, bool> typeOk = r =>
+                {
+                    string n = r.GetType().Name;
+                    return isWindowDesigner ? n != "ReportDeclaration" : n == "ReportDeclaration";
+                };
                 object crObj;
                 object rcd = ParseStructureViaEditor(session.EditorView, src, 1, 10, out crObj, L);
-                if (rcd != null && rcd.GetType().Name != wantType)
+                if (rcd != null && !typeOk(rcd))
                 {
-                    L("rcd is " + rcd.GetType().Name + " (need " + wantType + ") — re-parsing with isWin pin.");
-                    object cr2; var rcd2 = ParseStructureViaIdeParser(src, 1, 10, isWindow, out cr2, L);
+                    L("rcd is " + rcd.GetType().Name + " (wrong context for isWindowDesigner=" + isWindowDesigner + ") — re-parsing with isWin pin.");
+                    object cr2; var rcd2 = ParseStructureViaIdeParser(src, 1, 10, isWindowDesigner, out cr2, L);
                     if (rcd2 != null) { rcd = rcd2; crObj = cr2; }
                 }
                 if (rcd == null)
                 {
                     object cr2;
-                    rcd = ParseStructureViaIdeParser(src, 1, 10, isWindow, out cr2, L);
+                    rcd = ParseStructureViaIdeParser(src, 1, 10, isWindowDesigner, out cr2, L);
                     if (rcd != null) crObj = cr2;
                 }
                 if (rcd == null)
@@ -171,7 +182,7 @@ namespace ClarionAssistant
                     Type common = WalkToType(designerView, CommonDesignerViewSimpleName) ?? designerView.GetType();
                     var stat = common.GetMethod("ParseControlString", BindingFlags.Public | BindingFlags.Static,
                         null, new[] { typeof(string), typeof(bool) }, null);
-                    if (stat != null) rcd = stat.Invoke(null, new object[] { src, !isWindow });
+                    if (stat != null) rcd = stat.Invoke(null, new object[] { src, !isWindowDesigner });
                     L("static ParseControlString fallback -> " + (rcd == null ? "NULL" : rcd.GetType().Name));
                 }
                 if (rcd == null) { EndSession(session, "The structure couldn't be parsed for the designer.", L, log); return; }
@@ -182,16 +193,23 @@ namespace ClarionAssistant
                 // view itself; do NOT SwitchView afterwards.
                 MethodInfo build = FindMethodByArity(designerView.GetType(), "ShowDesigner", 5);
                 if (build == null) { EndSession(session, "Designer build entry not found (IDE version mismatch?).", L, log); return; }
-                object ret = build.Invoke(designerView, new object[] { rcd, cr, isWindow, isWindow, false });
+                object ret = build.Invoke(designerView, new object[] { rcd, cr, isWindowDesigner, isWindowWindow, false });
                 L("instance ShowDesigner -> " + (ret ?? "void"));
 
+                // Health gate is KIND-aware: m_wddesignerControl is the WINDOW designer's control — the
+                // REPORT designer leaves it null even when fully built/rendered (live-confirmed 5.0.377:
+                // wdc=null while the report designer was on screen). For reports, trust ShowDesigner's
+                // bool return; log the fields for diagnostics either way.
                 object wdc = GetField(designerView, "m_wddesignerControl");
-                bool healthy = wdc != null
-                    && !(GetPropAny(wdc, "IsDisposed") is bool b1 && b1)
-                    && GetPropAny(wdc, "Parent") != null;
                 L("health: wdc=" + (wdc == null ? "null" : wdc.GetType().Name)
                     + " IsDisposed=" + (GetPropAny(wdc, "IsDisposed") ?? "n/a")
-                    + " Parent=" + (GetPropAny(wdc, "Parent")?.GetType().Name ?? "null"));
+                    + " Parent=" + (GetPropAny(wdc, "Parent")?.GetType().Name ?? "null")
+                    + " showDesignerRet=" + (ret ?? "void"));
+                bool healthy = isWindowDesigner
+                    ? wdc != null
+                      && !(GetPropAny(wdc, "IsDisposed") is bool b1 && b1)
+                      && GetPropAny(wdc, "Parent") != null
+                    : ret is bool rb && rb;
                 if (!healthy) { EndSession(session, "The designer surface didn't build (see " + LogPath() + ").", L, log); return; }
 
                 StartWatching(session, L);
@@ -234,12 +252,17 @@ namespace ClarionAssistant
                     // back to its Source view. Save produces a merge (handled above, same tick — the merge
                     // check runs first); a flip with NO merge is a cancel — close the scratch and end the
                     // session so the caller can unlock.
+                    // ONLY evaluated while the scratch tab IS the active workbench window: when the user
+                    // switches IDE tabs (e.g. to peek at the locked Monaco), ActiveViewContent stops
+                    // reporting the designer and 5.0.377 misread that as a cancel, killing live sessions.
+                    object activeWb = GetActiveWorkbenchWindow();
+                    if (activeWb == null || !ReferenceEquals(activeWb, session.WorkbenchWin)) return;
                     object active = GetPropAny(session.WorkbenchWin, "ActiveViewContent");
                     bool designerActive = active != null && ReferenceEquals(active, session.DesignerView);
                     if (designerActive) session.SawDesignerActive = true;
                     else if (session.SawDesignerActive)
                     {
-                        Log("[poll] designer view deselected with no merge -> cancel, closing scratch");
+                        Log("[poll] designer view deselected (scratch tab active) with no merge -> cancel, closing scratch");
                         CloseScratch(session);
                     }
                 }
@@ -432,6 +455,17 @@ namespace ClarionAssistant
             foreach (var sv in seq)
                 if (sv != null && sv.GetType().Name.IndexOf("Designer", StringComparison.OrdinalIgnoreCase) >= 0) return sv;
             return null;
+        }
+
+        private static object GetActiveWorkbenchWindow()
+        {
+            try
+            {
+                var t = FindType("ICSharpCode.SharpDevelop.Gui.WorkbenchSingleton");
+                var wb = t?.GetProperty("Workbench", BindingFlags.Public | BindingFlags.Static)?.GetValue(null, null);
+                return GetPropAny(wb, "ActiveWorkbenchWindow");
+            }
+            catch { return null; }
         }
 
         private static object GetTextEditorControl(object view)

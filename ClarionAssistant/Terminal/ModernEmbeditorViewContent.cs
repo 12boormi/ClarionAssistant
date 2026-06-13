@@ -928,6 +928,8 @@ namespace ClarionAssistant.Terminal
                     BringToFront();   // drag-drop from the Data pad: activate this tab so the dev can type immediately
                 else if (action == "openDesigner")
                     HandleOpenDesigner(json);
+                else if (action == "openDesignerCreate")
+                    HandleOpenDesignerCreate(json);   // template picker's choice (task 1f10aa51)
                 else if (action == "activateDesigner")
                     StructureDesignerService.ActivateCurrent(_panel);   // 'Show designer' on the modal lock overlay
             }
@@ -1170,16 +1172,160 @@ namespace ClarionAssistant.Terminal
         /// </summary>
         private void HandleOpenDesigner(string json)
         {
-            int reqId = 0, line = 0;
-            string buffer = null;
-            List<int[]> ranges = null;
+            int reqId, line; string buffer, templateTitle; List<int[]> ranges;
+            if (!ParseDesignerRequest(json, out reqId, out line, out buffer, out ranges, out templateTitle)) return;
+            if (buffer == null || ranges == null) { PostDesignerRefusal(reqId, "Designer request was malformed."); return; }
+
+            if (StructureDesignerService.IsActive)
+            {
+                StructureDesignerService.ActivateCurrent(_panel);
+                PostDesignerRefusal(reqId, "A structure designer is already open — close its tab first.");
+                return;
+            }
+
+            var hit = ClarionAppDataReader.FindStructureAtLine(buffer, line);
+            var lines = buffer.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+
+            if (hit.Found)
+            {
+                if (!RangeEditable(ranges, hit.StartLine, hit.EndLine))
+                {
+                    PostDesignerRefusal(reqId, "This " + hit.Type + " is in generated code — the designer only works on editable embed code.");
+                    return;
+                }
+                string structureText = string.Join("\n", lines.Skip(hit.StartLine - 1).Take(hit.EndLine - hit.StartLine + 1));
+                string label = string.IsNullOrEmpty(hit.Name) ? "CAWindow" : hit.Name;
+                bool isWindow = hit.Type == "WINDOW";
+                PostResponse(reqId, new Dictionary<string, object>
+                {
+                    { "ok", true }, { "mode", "edit" },
+                    { "startLine", hit.StartLine }, { "endLine", hit.EndLine }, { "type", hit.Type }
+                });
+                OpenDesignerDeferred(structureText, label, isWindow, isWindow);
+                return;
+            }
+
+            // Create-new mode: a BLANK editable line becomes a fresh structure.
+            string refusal = ValidateCreateLine(ranges, lines, line);
+            if (refusal != null) { PostDesignerRefusal(reqId, refusal); return; }
+
+            // Native parity (task 1f10aa51): offer the New Structure templates from DEFAULTS.CLW —
+            // the same file the native Ctrl+D picker reads. Monaco shows the picker and comes back via
+            // 'openDesignerCreate'. No templates (file missing) -> legacy hardcoded seed, no picker.
+            var templates = DefaultStructuresReader.Load();
+            if (templates.Count > 0)
+            {
+                var list = templates.Select(t => (object)new Dictionary<string, object> { { "title", t.Title }, { "type", t.Kind } }).ToList();
+                PostResponse(reqId, new Dictionary<string, object> { { "ok", true }, { "mode", "pickTemplate" }, { "templates", list } });
+                return;
+            }
+
+            PostResponse(reqId, new Dictionary<string, object>
+            {
+                { "ok", true }, { "mode", "insert" },
+                { "startLine", line }, { "endLine", line }, { "type", "WINDOW" }
+            });
+            OpenDesignerDeferred(FallbackSeed, "NewWindow", true, true);
+        }
+
+        /// <summary>
+        /// Second leg of create-new: Monaco's template picker chose an entry — re-validate the line
+        /// (the user may have typed while the picker was up), seed from the chosen DEFAULTS.CLW block,
+        /// and open with the designer flags the block's kind dictates (WINDOW / APPLICATION / REPORT).
+        /// </summary>
+        private void HandleOpenDesignerCreate(string json)
+        {
+            int reqId, line; string buffer, templateTitle; List<int[]> ranges;
+            if (!ParseDesignerRequest(json, out reqId, out line, out buffer, out ranges, out templateTitle)) return;
+            if (buffer == null || ranges == null || string.IsNullOrEmpty(templateTitle))
+            {
+                PostDesignerRefusal(reqId, "Designer request was malformed.");
+                return;
+            }
+            if (StructureDesignerService.IsActive)
+            {
+                StructureDesignerService.ActivateCurrent(_panel);
+                PostDesignerRefusal(reqId, "A structure designer is already open — close its tab first.");
+                return;
+            }
+
+            var lines = buffer.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+            string refusal = ValidateCreateLine(ranges, lines, line);
+            if (refusal != null) { PostDesignerRefusal(reqId, refusal); return; }
+
+            var template = DefaultStructuresReader.Load()
+                .FirstOrDefault(t => string.Equals(t.Title, templateTitle, StringComparison.Ordinal));
+            string structureText = template != null ? template.Source : FallbackSeed;
+            string kind = template != null ? template.Kind : "WINDOW";
+
+            // Scratch tab name = the template block's own label (e.g. Window / ProgressWindow / Report).
+            string label = "NewStructure";
+            var m = System.Text.RegularExpressions.Regex.Match(structureText, @"^\s*(\w+)");
+            if (m.Success) label = m.Groups[1].Value;
+
+            bool isWindowDesigner = kind != "REPORT";
+            bool isWindowWindow = kind == "WINDOW";
+
+            PostResponse(reqId, new Dictionary<string, object>
+            {
+                { "ok", true }, { "mode", "insert" },
+                { "startLine", line }, { "endLine", line }, { "type", kind }
+            });
+            OpenDesignerDeferred(structureText, label, isWindowDesigner, isWindowWindow);
+        }
+
+        private const string FallbackSeed =
+            "NewWindow WINDOW('New Window'),AT(,,200,120),GRAY,SYSTEM\n" +
+            "         \n" +
+            "       END";
+
+        private static bool RangeEditable(List<int[]> ranges, int start, int end)
+        {
+            foreach (var r in ranges) if (start >= r[0] && end <= r[1]) return true;
+            return false;
+        }
+
+        // null = OK; else the refusal message.
+        private static string ValidateCreateLine(List<int[]> ranges, string[] lines, int line)
+        {
+            bool lineEditable = RangeEditable(ranges, line, line);
+            bool lineBlank = line >= 1 && line <= lines.Length && lines[line - 1].Trim().Length == 0;
+            if (lineEditable && lineBlank) return null;
+            return lineEditable
+                ? "Put the caret inside a WINDOW/REPORT, or on a blank line to create a new structure."
+                : "The designer only works in editable embed code.";
+        }
+
+        /// <summary>Run the designer open off this reentrant WebView2 message-handler stack (save's rule).</summary>
+        private void OpenDesignerDeferred(string structureText, string label, bool isWindowDesigner, bool isWindowWindow)
+        {
+            Action open = () =>
+            {
+                string err = StructureDesignerService.Open(structureText, label, isWindowDesigner, isWindowWindow, _panel,
+                    onBufferChanged: text => PostDesignerMessage("designerSplice", text, null),
+                    onClosed: finalText =>
+                    {
+                        PostDesignerMessage("designerClosed", finalText, null);
+                        BringToFront();   // the scratch tab auto-closed after the merge — hand focus back here
+                    });
+                if (err != null) PostDesignerMessage("designerClosed", null, err);
+            };
+            if (_panel != null && _panel.IsHandleCreated) _panel.BeginInvoke(open);
+            else open();
+        }
+
+        private bool ParseDesignerRequest(string json, out int reqId, out int line, out string buffer,
+            out List<int[]> ranges, out string templateTitle)
+        {
+            reqId = 0; line = 0; buffer = null; ranges = null; templateTitle = null;
             try
             {
                 var data = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(json) as Dictionary<string, object>;
-                if (data == null) return;
+                if (data == null) return false;
                 if (data.ContainsKey("reqId")) reqId = Convert.ToInt32(data["reqId"]);
                 if (data.ContainsKey("line")) line = Convert.ToInt32(data["line"]);
                 if (data.ContainsKey("buffer")) buffer = data["buffer"] as string;
+                if (data.ContainsKey("templateTitle")) templateTitle = data["templateTitle"] as string;
                 if (data.ContainsKey("ranges"))
                 {
                     var arr = data["ranges"] as object[];
@@ -1194,82 +1340,9 @@ namespace ClarionAssistant.Terminal
                         }
                     }
                 }
+                return true;
             }
-            catch { return; }
-            if (buffer == null || ranges == null) { PostDesignerRefusal(reqId, "Designer request was malformed."); return; }
-
-            if (StructureDesignerService.IsActive)
-            {
-                StructureDesignerService.ActivateCurrent(_panel);
-                PostDesignerRefusal(reqId, "A structure designer is already open — close its tab first.");
-                return;
-            }
-
-            Func<int, int, bool> editable = (s, e2) =>
-            {
-                foreach (var r in ranges) if (s >= r[0] && e2 <= r[1]) return true;
-                return false;
-            };
-
-            var hit = ClarionAppDataReader.FindStructureAtLine(buffer, line);
-            var lines = buffer.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
-            string structureText, label;
-            bool isWindow;
-            int startLine, endLine;
-
-            if (hit.Found)
-            {
-                if (!editable(hit.StartLine, hit.EndLine))
-                {
-                    PostDesignerRefusal(reqId, "This " + hit.Type + " is in generated code — the designer only works on editable embed code.");
-                    return;
-                }
-                startLine = hit.StartLine; endLine = hit.EndLine;
-                structureText = string.Join("\n", lines.Skip(startLine - 1).Take(endLine - startLine + 1));
-                label = string.IsNullOrEmpty(hit.Name) ? "CAWindow" : hit.Name;
-                isWindow = hit.Type == "WINDOW";
-            }
-            else
-            {
-                // Create-new mode: a BLANK editable line becomes a fresh WINDOW.
-                bool lineEditable = editable(line, line);
-                bool lineBlank = line >= 1 && line <= lines.Length && lines[line - 1].Trim().Length == 0;
-                if (!lineEditable || !lineBlank)
-                {
-                    PostDesignerRefusal(reqId, lineEditable
-                        ? "Put the caret inside a WINDOW/REPORT, or on a blank line to create a new window."
-                        : "The designer only works in editable embed code.");
-                    return;
-                }
-                startLine = line; endLine = line;
-                label = "NewWindow";
-                isWindow = true;
-                structureText = "NewWindow WINDOW('New Window'),AT(,,200,120),GRAY,SYSTEM\n" +
-                                "         \n" +
-                                "       END";
-            }
-
-            // Tell Monaco we're going ahead — it arms a decoration-tracked splice target for [start..end].
-            PostResponse(reqId, new Dictionary<string, object>
-            {
-                { "ok", true }, { "mode", hit.Found ? "edit" : "insert" },
-                { "startLine", startLine }, { "endLine", endLine }, { "type", isWindow ? "WINDOW" : "REPORT" }
-            });
-
-            // Defer the open off this reentrant WebView2 message-handler stack (save's hard-won rule).
-            Action open = () =>
-            {
-                string err = StructureDesignerService.Open(structureText, label, isWindow, _panel,
-                    onBufferChanged: text => PostDesignerMessage("designerSplice", text, null),
-                    onClosed: finalText =>
-                    {
-                        PostDesignerMessage("designerClosed", finalText, null);
-                        BringToFront();   // the scratch tab auto-closed after the merge — hand focus back here
-                    });
-                if (err != null) PostDesignerMessage("designerClosed", null, err);
-            };
-            if (_panel != null && _panel.IsHandleCreated) _panel.BeginInvoke(open);
-            else open();
+            catch { return false; }
         }
 
         private void PostDesignerRefusal(int reqId, string message)

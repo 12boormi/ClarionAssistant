@@ -42,6 +42,14 @@ namespace ClarionAssistant.Services
         private static readonly Regex StructWordRx = new Regex(
             @"\b(IF|GROUP|QUEUE|RECORD|FILE|VIEW|REPORT|WINDOW|APPLICATION|MENUBAR|MENU|TOOLBAR|SHEET|TAB|OPTION|CLASS|INTERFACE|MAP|MODULE|ITEMIZE|JOIN|LOOP|CASE|BEGIN|EXECUTE)\b",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        // REPORT band structures (HEADER/FOOTER/FORM/DETAIL) — each takes an END, so the balance check
+        // must count them or their ENDs read as stray ("END has no matching structure"). Matched ONLY in
+        // declaration position — line start, an optional label, then the keyword immediately followed by
+        // ',' / '(' / end-of-line — so it never trips on a control's USE(?Header) or a 'Header ROUTINE'
+        // label. BREAK is deliberately excluded (a bare BREAK is a loop statement in code slots).
+        private static readonly Regex BandOpen = new Regex(
+            @"^\s*(?:[A-Za-z_][A-Za-z0-9_:]*\s+)?(HEADER|FOOTER|FORM|DETAIL)\s*(?:[,(]|$)",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
         private static readonly Regex EndRx = new Regex(@"^END\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
         private static readonly Regex IfRx = new Regex(@"^IF\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
         // 'DO RoutineName' — DO must start the statement (line start, whitespace, or after ';').
@@ -138,7 +146,7 @@ namespace ClarionAssistant.Services
                         if (!oneLiner) open.Push(new[] { ln, FirstNonWs(code) + 1 });
                         // fall through so a 'DO' on the same line is still checked
                     }
-                    else if (StructOpen.IsMatch(u))
+                    else if (StructOpen.IsMatch(u) || BandOpen.IsMatch(u))
                     {
                         // Skip a self-terminated inline structure (trailing '.' or an END later on the
                         // same line, e.g. "EXECUTE n; a; b END") — only multi-line openers are tracked.

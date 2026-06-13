@@ -950,9 +950,82 @@
         }).then(function (resp) {
             if (!resp) { showToast('Designer request timed out', false); return; }
             if (!resp.ok) { showToast(resp.message || 'Cannot open the designer here', false); return; }
+            if (resp.mode === 'pickTemplate') { showTemplatePicker(resp.templates || [], pos); return; }
             beginDesignerSession(resp.startLine, resp.endLine);
             showToast('Opening the ' + (resp.type === 'REPORT' ? 'report' : 'window') + ' designer — edits sync back here', true);
         });
+    }
+
+    // ----- "New Structure" template picker (task 1f10aa51) -----
+    // Blank-line Ctrl+D: the host returns the template list from <ClarionRoot>\LibSrc\win\DEFAULTS.CLW
+    // (the SAME file the native picker reads, so the entries match exactly — including user-added ones).
+    // The user's choice goes back via 'openDesignerCreate' and the normal designer session begins.
+    var tplFontPx = 13;
+    (function () { try { var v = parseInt(localStorage.getItem('modernEmbeditor.tplFontPx'), 10); if (!isNaN(v)) tplFontPx = Math.max(8, Math.min(28, v)); } catch (e) { } })();
+
+    function showTemplatePicker(templates, pos) {
+        if (!templates.length) { showToast('No structure templates found (DEFAULTS.CLW)', false); return; }
+        var old = document.getElementById('tplPicker');
+        if (old) old.remove();
+
+        var ov = document.createElement('div');
+        ov.id = 'tplPicker';
+        ov.style.cssText = 'position:fixed;inset:0;z-index:1001;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;';
+        var panel = document.createElement('div');
+        panel.style.cssText = 'background:#2d2d30;color:#eee;padding:14px 16px;border-radius:8px;font-family:Segoe UI,sans-serif;box-shadow:0 4px 24px rgba(0,0,0,.5);min-width:340px;';
+        panel.innerHTML =
+            '<div style="font-size:14px;margin-bottom:8px;">New Structure</div>' +
+            '<select id="tplList" size="18" style="width:100%;font-family:Segoe UI,sans-serif;background:#1e1e1e;color:#eee;border:1px solid #555;padding:2px;"></select>' +
+            '<div style="opacity:.6;font-size:11px;margin-top:6px;">Enter / double-click to open the designer · Esc to cancel · Ctrl+wheel resizes</div>' +
+            '<div style="text-align:right;margin-top:10px;">' +
+            '<button id="tplOk" style="margin-right:8px;padding:5px 18px;cursor:pointer;">OK</button>' +
+            '<button id="tplCancel" style="padding:5px 14px;cursor:pointer;">Cancel</button></div>';
+        ov.appendChild(panel);
+        document.body.appendChild(ov);
+
+        var list = document.getElementById('tplList');
+        list.style.fontSize = tplFontPx + 'px';
+        for (var i = 0; i < templates.length; i++) {
+            var o = document.createElement('option');
+            o.value = templates[i].title;
+            o.textContent = templates[i].title + (templates[i].type === 'REPORT' ? '   [report]' : '');
+            list.appendChild(o);
+        }
+        list.selectedIndex = 0;
+
+        function close() { ov.remove(); }
+        function accept() {
+            var title = list.value;
+            if (!title) return;
+            close();
+            var ed = activeEd();
+            requestFromHost('openDesignerCreate', {
+                line: pos.lineNumber, column: pos.column,
+                buffer: ed.getModel().getValue(), ranges: liveEditableRanges(),
+                templateTitle: title
+            }).then(function (resp) {
+                if (!resp) { showToast('Designer request timed out', false); return; }
+                if (!resp.ok) { showToast(resp.message || 'Cannot open the designer here', false); return; }
+                beginDesignerSession(resp.startLine, resp.endLine);
+                showToast('Opening the ' + (resp.type === 'REPORT' ? 'report' : 'window') + ' designer — edits sync back here', true);
+            });
+        }
+
+        document.getElementById('tplOk').onclick = accept;
+        document.getElementById('tplCancel').onclick = close;
+        list.ondblclick = accept;
+        ov.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') { e.preventDefault(); accept(); }
+            else if (e.key === 'Escape') { e.preventDefault(); close(); }
+        });
+        list.addEventListener('wheel', function (e) {
+            if (!e.ctrlKey) return;
+            e.preventDefault();
+            tplFontPx = Math.max(8, Math.min(28, tplFontPx + (e.deltaY < 0 ? 1 : -1)));
+            list.style.fontSize = tplFontPx + 'px';
+            try { localStorage.setItem('modernEmbeditor.tplFontPx', String(tplFontPx)); } catch (ex) { }
+        }, { passive: false });
+        list.focus();
     }
 
     function beginDesignerSession(startLine, endLine) {

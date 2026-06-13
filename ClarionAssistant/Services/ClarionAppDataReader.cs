@@ -335,6 +335,20 @@ namespace ClarionAssistant.Services
             return m.Success ? m.Groups[1].Value.ToUpperInvariant() : null;
         }
 
+        // Superset of StructKwRx for the END-balancing walk in FindStructureAtLine: also recognises the
+        // REPORT band structures (HEADER/FOOTER/FORM/DETAIL/BREAK), which the data-pad parse never needs
+        // but the designer-extraction MUST count or a band's END pops the enclosing REPORT early. \b lets
+        // it match a keyword glued to its attributes ("HEADER,AT(…)") since Clarion bands carry no label.
+        private static readonly Regex StructOrBandKwRx = new Regex(
+            @"^(WINDOW|REPORT|MENUBAR|TOOLBAR|SHEET|TAB|MENU|OPTION|GROUP|QUEUE|RECORD|CLASS|VIEW|JOIN|MAP|MODULE|ITEMIZE|HEADER|FOOTER|FORM|DETAIL|BREAK)\b",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static string StructOrBandKw(string s)
+        {
+            var m = StructOrBandKwRx.Match((s ?? "").TrimStart());
+            return m.Success ? m.Groups[1].Value.ToUpperInvariant() : null;
+        }
+
         private static bool IsStructKw(string labelU)
         {
             switch (labelU)
@@ -508,10 +522,14 @@ namespace ClarionAssistant.Services
 
                 bool isEnd = labelU == "END" && rest.Length == 0;
 
-                // Structure opener: named ("Label WINDOW…") or anonymous bare ("REPORT", "QUEUE,…").
-                string kw = StructKw(rest.ToUpperInvariant());
+                // Structure opener, band-aware (so a REPORT's HEADER/DETAIL/FOOTER/FORM nest correctly):
+                //   named   — "Detail DETAIL,USE(…)" / "Report REPORT,…": keyword leads the rest-of-line.
+                //   anon    — "HEADER,AT(…)" / "REPORT" / "QUEUE,PRE(x)": keyword leads the label token
+                //             itself (bands glue the keyword to its comma, so it's one whitespace token).
+                // Check rest first so a band's own label ("Detail") isn't mistaken for the keyword.
+                string kw = StructOrBandKw(rest);
                 bool anon = false;
-                if (kw == null && IsStructKw(labelU)) { kw = labelU; anon = true; }
+                if (kw == null) { kw = StructOrBandKw(label); if (kw != null) anon = true; }
 
                 // Open BEFORE the target-line capture so a caret ON the opener line counts as inside.
                 if (kw != null && !isEnd)
