@@ -327,6 +327,14 @@ namespace ClarionAssistant.Services
             IClarionLanguageClient c, string filePath, int line, int character, int timeoutMs, string bufferText)
         {
             var items = new List<LspClient.CompletionItemInfo>();
+            // The shared GetCompletionAsync completes against the document text we hand it — a null/empty buffer =
+            // empty document = no items. When the caller didn't pass a live buffer (the file-mode "context-free"
+            // call site), fall back to the on-disk text so the server has the document, mirroring
+            // SharedGetDiagnostics and the bundled LspClient.EnsureDocumentOpen. (Bob, ticket 3d9a6ec9)
+            if (string.IsNullOrEmpty(bufferText) && !string.IsNullOrEmpty(filePath) && File.Exists(filePath))
+            {
+                try { bufferText = File.ReadAllText(filePath); } catch { }
+            }
             try
             {
                 LspModels.CompletionResult[] comps =
