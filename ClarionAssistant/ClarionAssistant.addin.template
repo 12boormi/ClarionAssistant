@@ -46,6 +46,8 @@
               class="ClarionAssistant.ShowAgentPanelCommand"/>
     <MenuItem id="OpenModernEmbeditorPicker" label="CA Embeditor (open procedures)..."
               class="ClarionAssistant.OpenModernEmbeditorPickerCommand"/>
+    <MenuItem id="OpenSourceFileInCaEditor" label="CA Editor (open source file)..."
+              class="ClarionAssistant.OpenSourceFileInCaEditorCommand"/>
     <MenuItem id="ShowModernDataPad" label="CA Data Pad"
               class="ClarionAssistant.ShowModernDataPadCommand"/>
   </Path>

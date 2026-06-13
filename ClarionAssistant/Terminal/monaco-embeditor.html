@@ -238,7 +238,7 @@
 </head>
 <body>
     <div id="toolbar">
-        <div class="title">CA Embeditor — <span id="titleText">(no procedure)</span></div>
+        <div class="title"><span id="titlePrefix">CA Embeditor</span> — <span id="titleText">(no procedure)</span></div>
         <div class="spacer"></div>
         <button id="prevEmbedBtn" class="embed-nav" title="Previous Embed">&#8593;</button>
         <button id="nextEmbedBtn" class="embed-nav" title="Next Embed">&#8595;</button>
@@ -253,6 +253,7 @@
         <button id="themeBtn" title="Toggle light/dark background">&#127769;</button>
         <button id="splitBtn" title="Split editor — two panes of the same file (compare/copy between areas)">&#9707;</button>
         <button id="settingsBtn" title="Editor settings">&#9881;</button>
+        <button id="reloadBtn" style="display:none" title="Reload from disk (discards your edits — click twice to confirm)">&#10227; Reload</button>
         <button id="saveBtn" title="Save changes (Ctrl+S)">Save</button>
     </div>
     <div id="settingsPanel" class="hidden">
@@ -342,6 +343,9 @@
     var readonlyDecorations = []; // decoration ids for the grey read-only (generated) lines
     var guarding = false;         // re-entrancy/suppression flag for the read-only guard
     var saveEnabled = false;      // true when opened from the picker (bound to a procedure)
+    var fileMode = false;         // true when the tab edits a plain source FILE — whole buffer editable,
+                                  // no slot guard/decorations, save posts full text, embed nav disabled
+    var reloadArmed = false;      // two-click confirm for Reload (discards edits)
     var toastTimer = null;
     var saveSafetyTimer = null;   // ensures the "Saving…" toast can never hang forever
     var pendingRequests = {};     // reqId -> resolver, for async LSP completion/hover round-trips
@@ -474,6 +478,18 @@
                 installKeyBindings();          // capture-phase dispatcher for all rebindable Clarion editor keys
                 installGlyphBookmarkClick();   // far-left margin click toggles a bookmark (#16)
                 document.getElementById('saveBtn').addEventListener('click', doSave);
+                // Reload (file mode): discards edits, so require a second click within 4s to confirm.
+                document.getElementById('reloadBtn').addEventListener('click', function () {
+                    if (!fileMode) return;
+                    if (!reloadArmed) {
+                        reloadArmed = true;
+                        showToast('Reload discards your edits — click Reload again to confirm', false);
+                        setTimeout(function () { reloadArmed = false; }, 4000);
+                        return;
+                    }
+                    reloadArmed = false;
+                    postToHost({ action: 'reload' });
+                });
                 var splitBtn = document.getElementById('splitBtn');
                 if (splitBtn) splitBtn.addEventListener('click', toggleSplit);   // split toggle (#15)
                 installNavTracking(editor);    // record cursor jumps for Back/Forward (#14)
@@ -499,8 +515,18 @@
     function applySource(msg) {
         embedRanges = msg.editableRanges || [];
         saveEnabled = !!msg.saveEnabled;
+        fileMode = !!msg.fileMode;
         var sb = document.getElementById('saveBtn');
         if (sb) sb.style.display = saveEnabled ? '' : 'none';
+        // File mode: relabel, show Reload, hide the embed-slot navigation (no slots exist).
+        var tp = document.getElementById('titlePrefix');
+        if (tp) tp.textContent = fileMode ? 'CA Editor' : 'CA Embeditor';
+        var rb = document.getElementById('reloadBtn');
+        if (rb) rb.style.display = fileMode ? '' : 'none';
+        ['prevEmbedBtn', 'nextEmbedBtn', 'prevFilledBtn', 'nextFilledBtn'].forEach(function (id) {
+            var b = document.getElementById(id);
+            if (b) b.style.display = fileMode ? 'none' : '';
+        });
         document.getElementById('titleText').textContent = (msg.title || '(no procedure)');
         setTheme(themePrefDark);   // honor the user's persisted light/dark choice over the host's IDE theme
         if (msg.settings) { applyEditorSettings(msg.settings); populateSettingsPanel(msg.settings); }
@@ -514,6 +540,8 @@
                 var model = editor.getModel();
                 guarding = true;            // programmatic load — don't let the guard revert it
                 model.setValue(text);
+                // Honor the host's language choice (file mode can open non-Clarion files as plaintext).
+                try { if (msg.language) monaco.editor.setModelLanguage(model, msg.language); } catch (e) { }
                 applyEmbedDecorations();
                 guarding = false;
                 restoreEmbedState(msg);     // bookmarks + cursor (once per tab); else reveal line 1
@@ -529,6 +557,12 @@
     function applyEmbedDecorations() {
         if (!editor) return;
         var model = editor.getModel();
+        if (fileMode) {
+            // Whole buffer is editable — clear any slot/readonly paint and skip the machinery.
+            embedDecorations = model.deltaDecorations(embedDecorations, []);
+            readonlyDecorations = model.deltaDecorations(readonlyDecorations, []);
+            return;
+        }
         var lineCount = model.getLineCount();
 
         var editDecos = (embedRanges || []).map(function (r) {
@@ -632,10 +666,16 @@
         // timer would have fired. (Security + adversary finding.)
         if (_bookmarkPersistTimer) { clearTimeout(_bookmarkPersistTimer); _bookmarkPersistTimer = null; }
         postToHost({ action: 'saveBookmarks', bookmarks: bookmarkLines() });
-        postToHost({ action: 'save', slots: gatherSlots() });
-        // Persist the "Saving…" toast (the save re-opens the embeditor for a few seconds) until the
-        // host replies with the result — otherwise it can fade before the result arrives.
-        showToast('Saving… (re-opening the embeditor)', true, true);
+        if (fileMode) {
+            // Plain file: hand the host the whole buffer; it writes the file directly (fast, no embeditor).
+            postToHost({ action: 'save', text: editor.getModel().getValue() });
+            showToast('Saving…', true, true);
+        } else {
+            postToHost({ action: 'save', slots: gatherSlots() });
+            // Persist the "Saving…" toast (the save re-opens the embeditor for a few seconds) until the
+            // host replies with the result — otherwise it can fade before the result arrives.
+            showToast('Saving… (re-opening the embeditor)', true, true);
+        }
         // Safety net: never leave "Saving…" up forever if the result message is lost.
         if (saveSafetyTimer) clearTimeout(saveSafetyTimer);
         saveSafetyTimer = setTimeout(function () {
@@ -940,6 +980,7 @@
     var designerSession = null;   // { decoId } — null when no designer is open
 
     function cmdStructureDesigner() {
+        if (fileMode) { showToast('The structure designer needs an embeditor-backed procedure — not available for plain files', false); return; }
         if (designerSession) { showToast('A designer session is already open — close its tab first', false); return; }
         var ed = activeEd();
         var pos = ed.getPosition();
@@ -1536,6 +1577,7 @@
     // decoration-edge scheme failed to grow onto a freshly-created trailing line — a single-line/empty
     // slot couldn't gain a second line at all.)
     function isEditableRange(range) {
+        if (fileMode) return true;   // plain file: everything is editable
         if (!range) return false;
         for (var i = 0; i < embedRanges.length; i++) {
             if (range.startLineNumber >= embedRanges[i][0] && range.endLineNumber <= embedRanges[i][1])
@@ -1607,6 +1649,8 @@
     var diagTimer = null;
 
     function liveEditableRanges() {
+        // File mode: the whole buffer is one "slot" — diagnostics clamp to it, i.e. the entire file.
+        if (fileMode && editor) return [[1, editor.getModel().getLineCount()]];
         // embedRanges is the source of truth (kept in sync by the read-only guard).
         return embedRanges.map(function (r) { return [r[0], r[1]]; });
     }
@@ -2006,6 +2050,7 @@
 
     function navEmbed(dir, filledOnly) {
         if (!editor) return;
+        if (fileMode) { showToast('No embed slots — this is a plain source file', false); return; }
         var ed = activeEd();   // operate on the focused split pane, not always the primary (#15)
         var starts = embedStarts(filledOnly);
         if (!starts.length) { showToast(filledOnly ? 'No filled embed slots' : 'No embed slots', false); return; }

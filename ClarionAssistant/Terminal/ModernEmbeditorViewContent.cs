@@ -44,6 +44,15 @@ namespace ClarionAssistant.Terminal
         private readonly bool _saveEnabled;
         private readonly string _lspFileName;        // synthetic .clw URI for LSP completion/hover requests
 
+        // File mode (ticket 564aa142): the tab edits a plain source file on disk (.clw/.inc/...) instead of
+        // an embeditor snapshot. Save = encoding-preserving file write; no slot machinery, no Data pad refresh,
+        // no designer. _lspFileName is the REAL path so the LSP resolves includes/symbols against the file.
+        private readonly string _filePath;
+        private readonly bool _fileMode;
+        private readonly Encoding _fileEncoding;     // detected at open; writes round-trip the same encoding
+        private DateTime _fileLastWriteUtc;          // disk snapshot for changed-on-disk detection
+        private bool _fileOverwriteArmed;            // a save that hit the disk-conflict guard arms overwrite-on-retry
+
         private string _tempDir;
         private const string VIRTUAL_HOST = "clarion-embeditor-data";
 
@@ -847,6 +856,92 @@ namespace ClarionAssistant.Terminal
             _panel.HandleCreated += OnHandleCreated;
         }
 
+        /// <summary>
+        /// File mode — open a plain source file (.clw/.inc/.equ/...) for whole-buffer editing.
+        /// Same Monaco page and language services as the embeditor, but save writes the file
+        /// (encoding-preserving) and all embed/slot machinery is bypassed.
+        /// </summary>
+        public ModernEmbeditorViewContent(string filePath, bool isDark)
+        {
+            _filePath = Path.GetFullPath(filePath);
+            _fileMode = true;
+            _title = Path.GetFileName(_filePath);
+            _fileEncoding = DetectFileEncoding(_filePath);
+            _sourceText = File.ReadAllText(_filePath, _fileEncoding);
+            _fileLastWriteUtc = File.GetLastWriteTimeUtc(_filePath);
+            _editableRanges = new List<int[]>();
+            _language = LanguageForFile(_filePath);
+            _isDark = isDark;
+            _procedureName = null;
+            _saveEnabled = true;
+            _originalSlotTexts = new List<string>();
+            _lspFileName = _filePath;     // real path → LSP sees the actual file
+            TitleName = "CA: " + _title;
+
+            _panel = new Panel { Dock = DockStyle.Fill, BackColor = isDark ? Color.FromArgb(30, 30, 46) : Color.FromArgb(239, 241, 245) };
+            _webView = new WebView2 { Dock = DockStyle.Fill };
+            _panel.Controls.Add(_webView);
+
+            lock (_instances) { _instances.Add(this); }
+            _panel.HandleCreated += OnHandleCreated;
+        }
+
+        /// <summary>The file this tab edits (file mode), else null.</summary>
+        public string FilePath { get { return _filePath; } }
+
+        /// <summary>Find the open file-mode tab for a path, or null. Used by the open command to dedup.</summary>
+        public static ModernEmbeditorViewContent FindByFilePath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return null;
+            string full;
+            try { full = Path.GetFullPath(path); } catch { return null; }
+            lock (_instances)
+            {
+                foreach (var inst in _instances)
+                    if (inst._fileMode && string.Equals(inst._filePath, full, StringComparison.OrdinalIgnoreCase))
+                        return inst;
+            }
+            return null;
+        }
+
+        /// <summary>Activate this tab (public wrapper over the deferred SelectWindow used elsewhere).</summary>
+        public void ActivateTab() { BringToFront(); }
+
+        /// <summary>
+        /// BOM-detect, else ANSI. Clarion source is traditionally Windows-ANSI; decoding it as UTF-8
+        /// would mangle high-bit characters and a save would then write the mangled text back. ReadAllText
+        /// honors a BOM when present, so only the no-BOM default differs from stock behavior.
+        /// </summary>
+        private static Encoding DetectFileEncoding(string path)
+        {
+            try
+            {
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    var bom = new byte[4];
+                    int n = fs.Read(bom, 0, 4);
+                    if (n >= 3 && bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF) return new UTF8Encoding(true);
+                    if (n >= 2 && bom[0] == 0xFF && bom[1] == 0xFE) return Encoding.Unicode;
+                    if (n >= 2 && bom[0] == 0xFE && bom[1] == 0xFF) return Encoding.BigEndianUnicode;
+                }
+            }
+            catch { }
+            return Encoding.Default;
+        }
+
+        private static string LanguageForFile(string path)
+        {
+            string ext = (Path.GetExtension(path) ?? "").ToLowerInvariant();
+            switch (ext)
+            {
+                case ".clw": case ".inc": case ".equ": case ".int":
+                case ".tpl": case ".tpw": case ".trn": case ".pr":
+                    return "clarion";
+                default:
+                    return "plaintext";
+            }
+        }
+
         private async void OnHandleCreated(object sender, EventArgs e)
         {
             if (_isInitializing || _isInitialized) return;
@@ -879,8 +974,9 @@ namespace ClarionAssistant.Terminal
                     _webView.CoreWebView2.Navigate(new Uri(htmlPath).AbsoluteUri + "?v=" + File.GetLastWriteTimeUtc(htmlPath).Ticks);
 
                 // On open (UI thread): refresh the pad's IDE-sourced caches (whole-app .txa for Local/Global
-                // Data; live dictionary snapshot for Other Files). Silent.
-                RefreshPadSources();
+                // Data; live dictionary snapshot for Other Files). Silent. File mode has no app context —
+                // the refresh would just churn the IDE for nothing (and there may be no .app open at all).
+                if (!_fileMode) RefreshPadSources();
             }
             catch (Exception ex)
             {
@@ -926,12 +1022,20 @@ namespace ClarionAssistant.Terminal
                     HandleSelectionChanged(json);
                 else if (action == "focusEditor")
                     BringToFront();   // drag-drop from the Data pad: activate this tab so the dev can type immediately
+                else if (action == "reload")
+                    HandleReload();                   // file mode: re-read from disk, discard edits
                 else if (action == "openDesigner")
-                    HandleOpenDesigner(json);
+                {
+                    if (!_fileMode) HandleOpenDesigner(json);   // designer needs an embeditor-backed procedure
+                }
                 else if (action == "openDesignerCreate")
-                    HandleOpenDesignerCreate(json);   // template picker's choice (task 1f10aa51)
+                {
+                    if (!_fileMode) HandleOpenDesignerCreate(json);   // template picker's choice (task 1f10aa51)
+                }
                 else if (action == "activateDesigner")
-                    StructureDesignerService.ActivateCurrent(_panel);   // 'Show designer' on the modal lock overlay
+                {
+                    if (!_fileMode) StructureDesignerService.ActivateCurrent(_panel);   // 'Show designer' on the modal lock overlay
+                }
             }
             catch (Exception ex)
             {
@@ -942,6 +1046,8 @@ namespace ClarionAssistant.Terminal
         /// <summary>Persist the user's edits: parse the per-slot payload and run the save round-trip.</summary>
         private void HandleSave(string json)
         {
+            if (_fileMode) { HandleFileSave(json); return; }
+
             if (!_saveEnabled || string.IsNullOrWhiteSpace(_procedureName))
             {
                 PostSaveResult(false, "Save isn't available — this tab was opened in mirror mode, not from the procedure picker.");
@@ -973,6 +1079,69 @@ namespace ClarionAssistant.Terminal
                 _panel.BeginInvoke((Action)(() => RunSaveRoundTrip(captured)));
             else
                 RunSaveRoundTrip(captured);
+        }
+
+        /// <summary>
+        /// File-mode save: write the whole buffer back to disk, preserving the encoding detected at open
+        /// and normalizing line endings to CRLF (Clarion tooling expects CRLF). Guards against the file
+        /// having changed on disk since open/last save — first attempt reports the conflict, an immediate
+        /// retry overwrites (the page surfaces the message so the dev makes that call consciously).
+        /// Plain file I/O — safe on this stack, no native embeditor round-trip involved.
+        /// </summary>
+        private void HandleFileSave(string json)
+        {
+            string text;
+            try
+            {
+                var ser = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+                var data = ser.DeserializeObject(json) as Dictionary<string, object>;
+                text = (data != null && data.ContainsKey("text")) ? data["text"] as string : null;
+                if (text == null) { PostSaveResult(false, "Save failed: malformed payload (no text)."); return; }
+            }
+            catch (Exception ex)
+            {
+                PostSaveResult(false, "Save failed parsing the editor payload: " + ex.Message);
+                return;
+            }
+
+            try
+            {
+                var diskUtc = File.Exists(_filePath) ? File.GetLastWriteTimeUtc(_filePath) : DateTime.MinValue;
+                if (diskUtc != _fileLastWriteUtc && !_fileOverwriteArmed)
+                {
+                    _fileOverwriteArmed = true;
+                    PostSaveResult(false, _title + " changed on disk since it was opened. Save again to overwrite the disk version, or use Reload to discard your edits and pick up the disk version.");
+                    return;
+                }
+                _fileOverwriteArmed = false;
+
+                text = text.Replace("\r\n", "\n").Replace("\n", "\r\n");
+                File.WriteAllText(_filePath, text, _fileEncoding);
+                _fileLastWriteUtc = File.GetLastWriteTimeUtc(_filePath);
+                _sourceText = text;
+                PostSaveResult(true, "Saved " + _title);
+            }
+            catch (Exception ex)
+            {
+                PostSaveResult(false, "Save failed: " + ex.Message);
+            }
+        }
+
+        /// <summary>File-mode reload: re-read the file from disk and push it to the page (discards edits).</summary>
+        private void HandleReload()
+        {
+            if (!_fileMode) return;
+            try
+            {
+                _sourceText = File.ReadAllText(_filePath, _fileEncoding);
+                _fileLastWriteUtc = File.GetLastWriteTimeUtc(_filePath);
+                _fileOverwriteArmed = false;
+                SendSource();
+            }
+            catch (Exception ex)
+            {
+                PostSaveResult(false, "Reload failed: " + ex.Message);
+            }
         }
 
         // The actual save round-trip — re-open native embed, write slots, save+close. Runs deferred (off the
@@ -1567,6 +1736,12 @@ namespace ClarionAssistant.Terminal
             if (_histScopeResolved) return;
             _histScopeResolved = true;
             try { _histSolutionPath = EditorService.GetOpenSolutionPath(); } catch { _histSolutionPath = null; }
+            if (_fileMode)
+            {
+                // File tabs scope history/cursor/bookmarks by path — no app::procedure identity exists.
+                _histProcKey = "file::" + _filePath.ToLowerInvariant();
+                return;
+            }
             string appName = null;
             try
             {
@@ -1772,6 +1947,8 @@ namespace ClarionAssistant.Terminal
                     "\"title\":" + JsonString(_title) + "," +
                     "\"language\":" + JsonString(_language) + "," +
                     "\"isDark\":" + (_isDark ? "true" : "false") + "," +
+                    "\"fileMode\":" + (_fileMode ? "true" : "false") + "," +
+                    "\"filePath\":" + JsonString(_filePath ?? "") + "," +
                     "\"saveEnabled\":" + (_saveEnabled ? "true" : "false") + "," +
                     "\"editableRanges\":" + RangesJson() + "," +
                     "\"settings\":" + settingsJson + "," +
