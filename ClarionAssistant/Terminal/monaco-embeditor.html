@@ -348,6 +348,8 @@
     var reloadArmed = false;      // two-click confirm for Reload (discards edits)
     var isDirty = false;          // unsaved-changes flag — drives the ● indicator in the title banner
     var baseTitle = '(no procedure)';   // filename/procedure name without the dirty marker
+    var editSeq = 0;              // increments on each legal edit; echoed by saveResult so the ● clears ONLY
+                                  // if no edit happened during the save round-trip (pipeline item 6)
 
     // Render the title banner with a leading ● when there are unsaved edits (the Clarion IDE tab
     // can't be reliably decorated, so the page owns the dirty indicator). John's test feedback.
@@ -361,6 +363,15 @@
         if (isDirty === d) return;
         isDirty = d;
         renderTitle();
+    }
+    // File mode only: mirror the live buffer + dirty flag to the host so a tab close can save from the host's
+    // copy WITHOUT an async round-trip into this page. (pipeline CRITICAL — data loss on close)
+    // This is SYNCHRONOUS on every legal edit (NOT debounced): Run-2 found a debounce left _fileLiveText/_fileDirty
+    // stale when a tab closes within the window with no blur (esp. IDE shutdown / Ctrl+F4) → lost edits. The buffer
+    // is modest (hand-coded Clarion source) so a per-edit postMessage is cheap.
+    function pushFileState() {
+        if (!fileMode || !editor) return;
+        postToHost({ action: 'fileState', dirty: isDirty, seq: editSeq, text: editor.getModel().getValue() });
     }
     var toastTimer = null;
     var saveSafetyTimer = null;   // ensures the "Saving…" toast can never hang forever
@@ -488,6 +499,9 @@
                 installDropInsert(editor);     // accept Data-pad drops (plain text, at the drop point)
                 activeEditor = editor;         // commands target the focused pane; primary by default (#15)
                 editor.onDidFocusEditorText(function () { activeEditor = editor; });
+                // Flush the live buffer to the host immediately on blur (file mode), so the host's close-time copy
+                // is current even if the user clicks the tab's X before the 600ms debounce fires. (pipeline CRIT)
+                editor.onDidBlurEditorText(function () { if (fileMode && isDirty) pushFileState(); });
                 editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, doSave);
                 installFindKeyInterceptor();   // capture-phase Ctrl+F/Ctrl+H/F3 — beats Monaco's stock widgets
                 rebuildChordMap();             // seed the binding map from defaults (settings refine it later)
@@ -545,6 +559,7 @@
         });
         baseTitle = msg.title || '(no procedure)';
         isDirty = false;            // a fresh load (or reload) starts clean
+        editSeq = 0;                // reset the edit sequence — the host's mirror is clean after a load/reload
         renderTitle();
         setTheme(themePrefDark);   // honor the user's persisted light/dark choice over the host's IDE theme
         if (msg.settings) { applyEditorSettings(msg.settings); populateSettingsPanel(msg.settings); }
@@ -686,7 +701,8 @@
         postToHost({ action: 'saveBookmarks', bookmarks: bookmarkLines() });
         if (fileMode) {
             // Plain file: hand the host the whole buffer; it writes the file directly (fast, no embeditor).
-            postToHost({ action: 'save', text: editor.getModel().getValue() });
+            // Stamp it with editSeq so the host echoes it back — we clear the ● only if no edit happened since.
+            postToHost({ action: 'save', text: editor.getModel().getValue(), seq: editSeq });
             showToast('Saving…', true, true);
         } else {
             postToHost({ action: 'save', slots: gatherSlots() });
@@ -1648,6 +1664,9 @@
             // A legal user edit happened (this handler returned early for programmatic loads via
             // `guarding` and for reverted illegal edits) — mark the buffer dirty for the ● indicator.
             setDirty(true);
+            // File mode: advance the edit sequence (lets saveResult detect edits-during-save) and mirror the
+            // live buffer to the host (debounced) so a close can save it. (pipeline items 1 + 6)
+            if (fileMode) { editSeq++; pushFileState(); }   // synchronous mirror — no debounce (close-safety, Run-2)
             // Legal edit — fold its line delta into embedRanges, re-render decorations if the spans
             // moved, then refresh squiggles (debounced).
             if (applyChangesToRanges(e.changes)) {
@@ -1755,7 +1774,7 @@
             provideCompletionItems: function (model, position) {
                 var word = model.getWordUntilPosition(position);
                 var range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
-                return requestFromHost('completion', { line: position.lineNumber, column: position.column })
+                return requestFromHost('completion', { line: position.lineNumber, column: position.column, buffer: model.getValue() })
                     .then(function (resp) {
                         var items = (resp && resp.items) || [];
                         if (!items.length) maybeReportLsp(resp && resp.lsp);
@@ -2730,7 +2749,12 @@
                 setTheme(themePrefDark);   // user preference wins over IDE theme changes
             } else if (msg.type === 'saveResult') {
                 if (saveSafetyTimer) { clearTimeout(saveSafetyTimer); saveSafetyTimer = null; }
-                if (msg.ok) setDirty(false);   // only a SUCCESSFUL save clears the dirty marker
+                if (msg.ok) {
+                    // Clear the ● ONLY if the buffer hasn't changed since the snapshot we saved — otherwise edits
+                    // made during the save round-trip would be falsely marked clean. (pipeline item 6)
+                    if (msg.savedSeq == null || msg.savedSeq === editSeq) setDirty(false);
+                    if (fileMode) pushFileState();   // keep the host's mirror in sync with the post-save dirty state
+                }
                 showToast(msg.message, msg.ok);
             } else if (msg.type === 'response' && msg.reqId != null) {
                 var resolver = pendingRequests[msg.reqId];
