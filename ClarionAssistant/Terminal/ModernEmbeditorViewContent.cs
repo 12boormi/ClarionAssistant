@@ -27,12 +27,13 @@ namespace ClarionAssistant.Terminal
     /// Mirrors the proven WebView2-as-view pattern from DiffViewContent.cs: shared environment
     /// cache, virtual-host folder mapping for large-buffer transfer, and a JS to C# message bridge.
     /// </summary>
-    public class ModernEmbeditorViewContent : AbstractViewContent
+    public class ModernEmbeditorViewContent : AbstractViewContent, IMonacoEditorHost
     {
-        private Panel _panel;
-        private WebView2 _webView;
-        private bool _isInitialized;
-        private bool _isInitializing;
+        // Converge step 3: _panel is now the reusable MonacoEditorControl (which IS a Panel), so every
+        // designer/marshal/Control site that treated it as a Panel still compiles. The control owns the
+        // WebView2 + page nav + JS<->C# transport + inbound dispatch; this view implements IMonacoEditorHost.
+        private MonacoEditorControl _panel;
+        private bool _isInitialized;   // mirrored from the control via OnEditorNavigationCompleted
 
         private string _title;
         private string _sourceText;
@@ -60,7 +61,6 @@ namespace ClarionAssistant.Terminal
         private bool _fileDirty;
         private bool _disposed;
 
-        private string _tempDir;
         private const string VIRTUAL_HOST = "clarion-embeditor-data";
 
         // Find/Replace history scope: per-version (storage layer) + per-solution (folder) + per-procedure
@@ -754,15 +754,7 @@ namespace ClarionAssistant.Terminal
         /// <summary>Navigate this editor to a ROUTINE's declaration (Modern Data pad "go to routine" button).</summary>
         public void GotoRoutine(string name)
         {
-            if (string.IsNullOrEmpty(name)) return;
-            Action post = () =>
-            {
-                if (_webView == null || _webView.CoreWebView2 == null) return;
-                try { _webView.CoreWebView2.PostWebMessageAsJson("{\"type\":\"gotoRoutine\",\"name\":" + JsonString(name) + "}"); }
-                catch { }
-            };
-            try { if (_panel != null && _panel.InvokeRequired) _panel.BeginInvoke(post); else post(); }
-            catch { }
+            _panel?.GotoRoutine(name);
         }
 
         /// <summary>If a Modern Embeditor tab for this procedure is already open, focus it. Returns true if found.</summary>
@@ -825,18 +817,14 @@ namespace ClarionAssistant.Terminal
         public void InsertAtCursor(string text)
         {
             if (string.IsNullOrEmpty(text)) return;
+            // Marshal the insert + tab-activation together (the call may arrive off the UI thread from the
+            // Data pad). The control's InsertText also marshals internally, which is harmless here.
             Action post = () =>
             {
-                if (_webView == null || _webView.CoreWebView2 == null) return;
-                try
-                {
-                    string json = "{\"type\":\"insertText\",\"text\":" + JsonString(text) + "}";
-                    _webView.CoreWebView2.PostWebMessageAsJson(json);
-                    // Bring THIS editor tab to the front so the developer can start typing immediately after a
-                    // Data-pad double-click insert (the editor JS already does ed.focus() to place the caret).
-                    BringToFront();
-                }
-                catch { }
+                _panel?.InsertText(text);
+                // Bring THIS editor tab to the front so the developer can start typing immediately after a
+                // Data-pad double-click insert (the editor JS already does ed.focus() to place the caret).
+                BringToFront();
             };
             try { if (_panel != null && _panel.InvokeRequired) _panel.BeginInvoke(post); else post(); }
             catch { }
@@ -856,14 +844,10 @@ namespace ClarionAssistant.Terminal
             _lspFileName = MakeLspFileName(procedureName);
             TitleName = "CA: " + _title;
 
-            _panel = new Panel { Dock = DockStyle.Fill, BackColor = isDark ? Color.FromArgb(30, 30, 46) : Color.FromArgb(239, 241, 245) };
-            // Plain WebView2 — Monaco's native mouseWheelZoom handles Ctrl+wheel inside the
-            // renderer (a WinForms WndProc override never sees WebView2's inner Chrome wheel msg).
-            _webView = new WebView2 { Dock = DockStyle.Fill };
-            _panel.Controls.Add(_webView);
+            // Reusable Monaco surface; we are its host (IMonacoEditorHost). It self-inits on HandleCreated.
+            _panel = new MonacoEditorControl(this, isDark, "monaco-embeditor.html", VIRTUAL_HOST);
 
             lock (_instances) { _instances.Add(this); }
-            _panel.HandleCreated += OnHandleCreated;
         }
 
         /// <summary>
@@ -891,12 +875,10 @@ namespace ClarionAssistant.Terminal
             _lspFileName = _filePath;     // real path → LSP sees the actual file
             TitleName = "CA: " + _title;
 
-            _panel = new Panel { Dock = DockStyle.Fill, BackColor = isDark ? Color.FromArgb(30, 30, 46) : Color.FromArgb(239, 241, 245) };
-            _webView = new WebView2 { Dock = DockStyle.Fill };
-            _panel.Controls.Add(_webView);
+            // Reusable Monaco surface; we are its host (IMonacoEditorHost). It self-inits on HandleCreated.
+            _panel = new MonacoEditorControl(this, isDark, "monaco-embeditor.html", VIRTUAL_HOST);
 
             lock (_instances) { _instances.Add(this); }
-            _panel.HandleCreated += OnHandleCreated;
         }
 
         /// <summary>The file this tab edits (file mode), else null.</summary>
@@ -1004,108 +986,40 @@ namespace ClarionAssistant.Terminal
             }
         }
 
-        private async void OnHandleCreated(object sender, EventArgs e)
+        // ── IMonacoEditorHost (converge step 3) ─────────────────────────────────────────────────
+        // The MonacoEditorControl owns the WebView2 lifecycle + nav + inbound action routing; it
+        // calls these as page->host messages arrive. Each delegates to this view's existing handler,
+        // unchanged. The fileMode designer guards that used to wrap the dispatch cases live here now.
+        void IMonacoEditorHost.OnReady(MonacoEditorControl editor)
         {
-            if (_isInitializing || _isInitialized) return;
-            _isInitializing = true;
-
-            try
-            {
-                var environment = await WebView2EnvironmentCache.GetEnvironmentAsync();
-                await _webView.EnsureCoreWebView2Async(environment);
-
-                _tempDir = Path.Combine(Path.GetTempPath(), "ClarionEmbeditor_" + Guid.NewGuid().ToString("N").Substring(0, 8));
-                Directory.CreateDirectory(_tempDir);
-                _webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
-                    VIRTUAL_HOST, _tempDir,
-                    CoreWebView2HostResourceAccessKind.Allow);
-
-                var settings = _webView.CoreWebView2.Settings;
-                settings.IsScriptEnabled = true;
-                settings.AreDefaultContextMenusEnabled = false;
-                settings.AreDevToolsEnabled = true;
-                settings.IsStatusBarEnabled = false;
-                settings.IsZoomControlEnabled = false;
-                settings.AreBrowserAcceleratorKeysEnabled = false; // let Monaco own Ctrl+S, not the browser
-
-                _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
-                _webView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
-
-                string htmlPath = GetHtmlPath();
-                if (File.Exists(htmlPath))
-                    _webView.CoreWebView2.Navigate(new Uri(htmlPath).AbsoluteUri + "?v=" + File.GetLastWriteTimeUtc(htmlPath).Ticks);
-
-                // On open (UI thread): refresh the pad's IDE-sourced caches (whole-app .txa for Local/Global
-                // Data; live dictionary snapshot for Other Files). Silent. File mode has no app context —
-                // the refresh would just churn the IDE for nothing (and there may be no .app open at all).
-                if (!_fileMode) RefreshPadSources();
-            }
-            catch (Exception ex)
-            {
-                _isInitializing = false; // allow retry
-                System.Diagnostics.Debug.WriteLine("[ModernEmbeditorViewContent] Init error: " + ex.Message);
-            }
+            // On open: refresh the pad's IDE-sourced caches (whole-app .txa for Local/Global Data; live
+            // dictionary snapshot for Other Files). Silent. File mode has no app context, so skip it.
+            // (Was in the old OnHandleCreated; the "ready" message is the equivalent open moment.)
+            if (!_fileMode) RefreshPadSources();
+            SendSource();
         }
 
-        private void OnNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
-        {
-            _isInitialized = e.IsSuccess;
-            _isInitializing = false;
-            // SendSource is triggered by the JS "ready" message, not here — avoids double-send.
-        }
+        void IMonacoEditorHost.OnSave(MonacoEditorControl editor, string rawJson) { HandleSave(rawJson); }
+        void IMonacoEditorHost.OnClipboard(MonacoEditorControl editor, string rawJson) { HandleClipboard(rawJson); }
+        void IMonacoEditorHost.OnCompletion(MonacoEditorControl editor, string rawJson) { HandleCompletion(rawJson); }
+        void IMonacoEditorHost.OnHover(MonacoEditorControl editor, string rawJson) { HandleHover(rawJson); }
+        void IMonacoEditorHost.OnDiagnostics(MonacoEditorControl editor, string rawJson) { HandleDiagnostics(rawJson); }
+        void IMonacoEditorHost.OnSaveSettings(MonacoEditorControl editor, string rawJson) { HandleSaveSettings(rawJson); }
+        void IMonacoEditorHost.OnSaveHistory(MonacoEditorControl editor, string rawJson) { HandleSaveHistory(rawJson); }
+        void IMonacoEditorHost.OnSaveCursor(MonacoEditorControl editor, string rawJson) { HandleSaveCursor(rawJson); }
+        void IMonacoEditorHost.OnSaveBookmarks(MonacoEditorControl editor, string rawJson) { HandleSaveBookmarks(rawJson); }
+        void IMonacoEditorHost.OnSelectionChanged(MonacoEditorControl editor, string rawJson) { HandleSelectionChanged(rawJson); }
+        void IMonacoEditorHost.OnFocusEditor(MonacoEditorControl editor) { BringToFront(); }   // Data-pad drag-drop
+        void IMonacoEditorHost.OnReload(MonacoEditorControl editor) { HandleReload(); }        // file mode
+        void IMonacoEditorHost.OnFileState(MonacoEditorControl editor, string rawJson) { HandleFileState(rawJson); }  // file mode
 
-        private void OnWebMessageReceived(object sender, CoreWebView2WebMessageReceivedEventArgs e)
-        {
-            try
-            {
-                string json = e.TryGetWebMessageAsString();
-                string action = ExtractJsonValue(json, "action");
-                if (action == "ready")
-                    SendSource();
-                else if (action == "save")
-                    HandleSave(json);
-                else if (action == "clipboard")
-                    HandleClipboard(json);
-                else if (action == "completion")
-                    HandleCompletion(json);
-                else if (action == "hover")
-                    HandleHover(json);
-                else if (action == "diagnostics")
-                    HandleDiagnostics(json);
-                else if (action == "saveSettings")
-                    HandleSaveSettings(json);
-                else if (action == "saveHistory")
-                    HandleSaveHistory(json);
-                else if (action == "saveCursor")
-                    HandleSaveCursor(json);
-                else if (action == "saveBookmarks")
-                    HandleSaveBookmarks(json);
-                else if (action == "selectionChanged")
-                    HandleSelectionChanged(json);
-                else if (action == "focusEditor")
-                    BringToFront();   // drag-drop from the Data pad: activate this tab so the dev can type immediately
-                else if (action == "reload")
-                    HandleReload();                   // file mode: re-read from disk, discard edits
-                else if (action == "fileState")
-                    HandleFileState(json);            // file mode: page mirrors its live buffer + dirty flag to the host
-                else if (action == "openDesigner")
-                {
-                    if (!_fileMode) HandleOpenDesigner(json);   // designer needs an embeditor-backed procedure
-                }
-                else if (action == "openDesignerCreate")
-                {
-                    if (!_fileMode) HandleOpenDesignerCreate(json);   // template picker's choice (task 1f10aa51)
-                }
-                else if (action == "activateDesigner")
-                {
-                    if (!_fileMode) StructureDesignerService.ActivateCurrent(_panel);   // 'Show designer' on the modal lock overlay
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine("[ModernEmbeditorViewContent] Message error: " + ex.Message);
-            }
-        }
+        // Designer needs an embeditor-backed procedure → file mode refuses. Guard lives here now.
+        void IMonacoEditorHost.OnOpenDesigner(MonacoEditorControl editor, string rawJson) { if (!_fileMode) HandleOpenDesigner(rawJson); }
+        void IMonacoEditorHost.OnOpenDesignerCreate(MonacoEditorControl editor, string rawJson) { if (!_fileMode) HandleOpenDesignerCreate(rawJson); }
+        void IMonacoEditorHost.OnActivateDesigner(MonacoEditorControl editor) { if (!_fileMode) StructureDesignerService.ActivateCurrent(_panel); }
+
+        void IMonacoEditorHost.OnEditorNavigationCompleted(MonacoEditorControl editor, bool success) { _isInitialized = success; }
+        void IMonacoEditorHost.OnUnknownAction(MonacoEditorControl editor, string action, string rawJson) { }
 
         /// <summary>Persist the user's edits: parse the per-slot payload and run the save round-trip.</summary>
         private void HandleSave(string json)
@@ -1752,25 +1666,10 @@ namespace ClarionAssistant.Terminal
             PostResponse(reqId, new Dictionary<string, object> { { "ok", false }, { "message", message } });
         }
 
-        /// <summary>Push a designer-session event to Monaco (UI-thread marshalled, same as ApplySettings).</summary>
+        /// <summary>Push a designer-session event to Monaco (UI-thread marshalled by the control).</summary>
         private void PostDesignerMessage(string type, string text, string message)
         {
-            string json;
-            try
-            {
-                var d = new Dictionary<string, object> { { "type", type } };
-                if (text != null) d["text"] = text;
-                if (message != null) d["message"] = message;
-                json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(d);
-            }
-            catch { return; }
-            Action post = () =>
-            {
-                if (_webView == null || _webView.CoreWebView2 == null) return;
-                try { _webView.CoreWebView2.PostWebMessageAsJson(json); } catch { }
-            };
-            try { if (_panel != null && _panel.InvokeRequired) _panel.BeginInvoke(post); else post(); }
-            catch { }
+            _panel?.PostDesignerMessage(type, text, message);
         }
 
         /// <summary>
@@ -1811,14 +1710,7 @@ namespace ClarionAssistant.Terminal
             string sjson;
             try { sjson = new JavaScriptSerializer().Serialize(settings.ToDict()); }
             catch { return; }
-            Action post = () =>
-            {
-                if (_webView == null || _webView.CoreWebView2 == null) return;
-                try { _webView.CoreWebView2.PostWebMessageAsJson("{\"type\":\"applySettings\",\"settings\":" + sjson + "}"); }
-                catch { }
-            };
-            try { if (_panel != null && _panel.InvokeRequired) _panel.BeginInvoke(post); else post(); }
-            catch { }
+            _panel?.PostJson("{\"type\":\"applySettings\",\"settings\":" + sjson + "}");
         }
 
         /// <summary>Broadcast editor settings to all open Modern Embeditor tabs (mirrors ApplyThemeToAll).</summary>
@@ -2007,14 +1899,7 @@ namespace ClarionAssistant.Terminal
         {
             string fj = ModernEmbeditorHistory.ToJson(find);
             string rj = ModernEmbeditorHistory.ToJson(replace);
-            Action post = () =>
-            {
-                if (_webView == null || _webView.CoreWebView2 == null) return;
-                try { _webView.CoreWebView2.PostWebMessageAsJson("{\"type\":\"applyHistory\",\"find\":" + fj + ",\"replace\":" + rj + "}"); }
-                catch { }
-            };
-            try { if (_panel != null && _panel.InvokeRequired) _panel.BeginInvoke(post); else post(); }
-            catch { }
+            _panel?.PostJson("{\"type\":\"applyHistory\",\"find\":" + fj + ",\"replace\":" + rj + "}");
         }
 
         /// <summary>Broadcast Find/Replace history to all open Modern Embeditor tabs.</summary>
@@ -2039,25 +1924,10 @@ namespace ClarionAssistant.Terminal
             catch { return false; }
         }
 
-        /// <summary>Posts a {type:"response", reqId, data} message back to Monaco (marshaled to the UI thread).</summary>
+        /// <summary>Posts a {type:"response", reqId, data} message back to Monaco (marshaled by the control).</summary>
         private void PostResponse(int reqId, Dictionary<string, object> data)
         {
-            Action post = () =>
-            {
-                if (_webView == null || _webView.CoreWebView2 == null) return;
-                try
-                {
-                    var ser = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
-                    string json = ser.Serialize(new Dictionary<string, object>
-                    {
-                        { "type", "response" }, { "reqId", reqId }, { "data", data }
-                    });
-                    _webView.CoreWebView2.PostWebMessageAsJson(json);
-                }
-                catch { }
-            };
-            try { if (_panel != null && _panel.InvokeRequired) _panel.BeginInvoke(post); else post(); }
-            catch { }
+            _panel?.PostResponse(reqId, data);
         }
 
         /// <summary>Pulls a plain string out of an LSP textDocument/hover response (MarkupContent/string/array).</summary>
@@ -2132,11 +2002,7 @@ namespace ClarionAssistant.Terminal
 
         private void PostSaveResultOnce(bool ok, string message, long savedSeq)
         {
-            if (_webView == null || _webView.CoreWebView2 == null) return;
-            string json = "{\"type\":\"saveResult\",\"ok\":" + (ok ? "true" : "false") +
-                          ",\"savedSeq\":" + savedSeq +
-                          ",\"message\":" + JsonString(message) + "}";
-            try { _webView.CoreWebView2.PostWebMessageAsJson(json); } catch { }
+            _panel?.PostSaveResult(ok, message, savedSeq);
         }
 
         /// <summary>Update the displayed source. Sends immediately if ready, else waits for the JS "ready".</summary>
@@ -2153,7 +2019,7 @@ namespace ClarionAssistant.Terminal
 
         private void SendSource()
         {
-            if (_webView.CoreWebView2 == null) return;
+            if (_panel == null || _panel.TempDir == null) return;
 
             // Warm the language server as soon as the editor opens, so completion/hover/LSP-diagnostics
             // are ready by the time the dev uses them (self-heal if eager-start never fired).
@@ -2162,7 +2028,7 @@ namespace ClarionAssistant.Terminal
             try
             {
                 // Transfer source via the virtual host (temp file) to avoid huge postMessage payloads.
-                string sourceFile = Path.Combine(_tempDir, "source.txt");
+                string sourceFile = Path.Combine(_panel.TempDir, "source.txt");
                 File.WriteAllText(sourceFile, _sourceText ?? "", Encoding.UTF8);
 
                 string settingsJson;
@@ -2202,7 +2068,7 @@ namespace ClarionAssistant.Terminal
                     "\"cursorColumn\":" + cursorColumn + "," +
                     "\"bookmarks\":" + bookmarksJson + "," +
                     "\"sourceUrl\":\"https://" + VIRTUAL_HOST + "/source.txt\"}";
-                _webView.CoreWebView2.PostWebMessageAsJson(json);
+                _panel.PostJson(json);
             }
             catch (Exception ex)
             {
@@ -2213,10 +2079,8 @@ namespace ClarionAssistant.Terminal
         public void ApplyTheme(bool isDark)
         {
             _isDark = isDark;
-            if (_panel != null)
-                _panel.BackColor = isDark ? Color.FromArgb(30, 30, 46) : Color.FromArgb(239, 241, 245);
-            if (_isInitialized && _webView?.CoreWebView2 != null)
-                _webView.CoreWebView2.PostWebMessageAsJson("{\"type\":\"applyTheme\",\"isDark\":" + (isDark ? "true" : "false") + "}");
+            // The control recolors its own backdrop and posts {applyTheme} once it's live.
+            _panel?.ApplyTheme(isDark);
         }
 
         public static void ApplyThemeToAll(bool isDark)
@@ -2226,16 +2090,6 @@ namespace ClarionAssistant.Terminal
                 foreach (var inst in _instances)
                     inst.ApplyTheme(isDark);
             }
-        }
-
-        private string GetHtmlPath()
-        {
-            string assemblyDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-            string path = Path.Combine(assemblyDir, "Terminal", "monaco-embeditor.html");
-            if (File.Exists(path)) return path;
-            path = Path.Combine(assemblyDir, "monaco-embeditor.html");
-            if (File.Exists(path)) return path;
-            return Path.Combine(assemblyDir, "Terminal", "monaco-embeditor.html");
         }
 
         /// <summary>Serializes the editable ranges as a JSON array of [start,end] pairs (1-based, inclusive).</summary>
@@ -2331,10 +2185,12 @@ namespace ClarionAssistant.Terminal
             _disposed = true;
 
             lock (_instances) { _instances.Remove(this); }
-            if (_webView != null)
+            // Dispose the editor control (its WebView2 + temp dir) FIRST so the confirm MessageBox below
+            // can't get stuck behind a live WebView2 (the documented native<->WebView2 focus deadlock).
+            if (_panel != null)
             {
-                _webView.Dispose();
-                _webView = null;
+                _panel.Dispose();
+                _panel = null;
             }
 
             if (promptSave)
@@ -2359,12 +2215,6 @@ namespace ClarionAssistant.Terminal
                 catch { /* best-effort save-on-close; the tab is closing regardless */ }
             }
 
-            if (_panel != null)
-            {
-                _panel.Dispose();
-                _panel = null;
-            }
-            CleanupTempDir();
             base.Dispose();
         }
 
@@ -2381,13 +2231,5 @@ namespace ClarionAssistant.Terminal
             }
         }
 
-        private void CleanupTempDir()
-        {
-            if (_tempDir != null && Directory.Exists(_tempDir))
-            {
-                try { Directory.Delete(_tempDir, true); } catch { }
-                _tempDir = null;
-            }
-        }
     }
 }
