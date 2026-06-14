@@ -57,6 +57,9 @@
               class="ClarionAssistant.OpenSourceFileInCaEditorCommand"/>
     <MenuItem id="ShowModernDataPad" label="CA Data Pad"
               class="ClarionAssistant.ShowModernDataPadCommand"/>
+    <!-- SPIKE (task cc8b092f) Phase 1: toggle the experimental Monaco overlay on the default source editor. -->
+    <MenuItem id="ToggleMonacoSourceOverlay" label="Toggle Monaco Source Overlay (experimental)"
+              class="ClarionAssistant.ToggleMonacoSourceOverlayCommand"/>
   </Path>
 
   <!-- CA Embeditor button on the native embeditor toolbar. -->
