@@ -80,9 +80,13 @@ namespace ClarionAssistant
                 _dropStrip.DragOver += OnDropStripDragEnter;
                 _dropStrip.DragLeave += (s2, e2) => ApplyDropStripTheme(false);
                 _dropStrip.DragDrop += OnDropStripDragDrop;
-                _panel.Controls.Add(_dropStrip);   // added after _webView (Fill) → _dropStrip docks first, reserving
-                                                   // the bottom edge; the WebView2 fills the region above it (the two
-                                                   // never overlap, so the strip's drop region is clean).
+                _panel.Controls.Add(_dropStrip);
+                _dropStrip.BringToFront();
+                // Layout: strip is Dock=Bottom, WebView2 is Dock=Fill. BringToFront() puts the strip ahead of the
+                // WebView2 in the z-order so it reserves its bottom edge first and the WebView2 fills the remainder —
+                // the two never overlap. SetFilesDropMode re-asserts BringToFront() on EVERY Files-tab activation, so
+                // the layout is deterministic across fresh / restored / floating dock states (re-applied each time the
+                // strip is shown), not dependent on Controls.Add order. Validated live in C12.
                 ApplyDropStripTheme(false);
 
                 // Restore the ctrl-mousewheel font zoom (WebView2's built-in ZoomFactor) and keep it saved.

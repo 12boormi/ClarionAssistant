@@ -2041,9 +2041,9 @@
     })();
 
     postToHost({ action: 'ready' });
-    // Prime the Files tab too (the host also re-posts setExplorerData after each mutation). Marking it
-    // requested here avoids a redundant request on the first Files-tab click.
-    _explorerRequested = true;
+    // Prime the Files tab data early (the host also re-posts after each mutation, on every Files-tab activation,
+    // and when the solution finishes loading). Harmless if this lands before a solution is open — the later posts
+    // self-correct the (empty) result.
     postToHost({ action: 'requestExplorerData' });
 </script>
 </body>
