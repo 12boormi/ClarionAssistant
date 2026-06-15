@@ -83,6 +83,9 @@
     /* Bookmark glyph (Ctrl+F2) in the glyph margin */
     .bookmark-glyph { background: #2563eb; border-radius: 50% 50% 50% 0; transform: rotate(-45deg);
         width: 9px !important; height: 9px !important; margin-left: 5px; margin-top: 5px; box-shadow: 0 0 0 1px rgba(255,255,255,0.5); }
+    /* Breakpoint glyph (gutter click; overlay/file mode only) — solid red dot, VS-style. */
+    .breakpoint-glyph { background: #e51400; border-radius: 50%;
+        width: 11px !important; height: 11px !important; margin-left: 3px; margin-top: 4px; box-shadow: 0 0 0 1px rgba(255,255,255,0.5); cursor: pointer; }
 
     #editor { position: absolute; top: 38px; left: 0; right: 0; bottom: 0; }
     /* Split view (#15): second pane occupies the right half; primary shrinks to the left half. */
@@ -546,8 +549,15 @@
         embedRanges = msg.editableRanges || [];
         saveEnabled = !!msg.saveEnabled;
         fileMode = !!msg.fileMode;
+        breakpointsEnabled = !!msg.breakpointsEnabled;   // overlay: gutter-click toggles a breakpoint (not a bookmark)
+        designerEnabled = !!msg.designerEnabled;         // overlay: Ctrl+D designs structures in plain source files
         var sb = document.getElementById('saveBtn');
         if (sb) sb.style.display = saveEnabled ? '' : 'none';
+        // Optional GLOBAL read-only (the dual-control source overlay sends this for its inert mirror).
+        // Default off → the standalone embeditor/file view, which never sends the field, is unchanged.
+        var roAll = !!msg.readOnly;
+        try { editor.updateOptions({ readOnly: roAll }); } catch (e) { }
+        try { if (editor2) editor2.updateOptions({ readOnly: roAll }); } catch (e) { }
         // File mode: relabel, show Reload, hide the embed-slot navigation (no slots exist).
         var tp = document.getElementById('titlePrefix');
         if (tp) tp.textContent = fileMode ? 'CA Editor' : 'CA Embeditor';
@@ -1014,7 +1024,7 @@
     var designerSession = null;   // { decoId } — null when no designer is open
 
     function cmdStructureDesigner() {
-        if (fileMode) { showToast('The structure designer needs an embeditor-backed procedure — not available for plain files', false); return; }
+        if (fileMode && !designerEnabled) { showToast('The structure designer needs an embeditor-backed procedure — not available for plain files', false); return; }
         if (designerSession) { showToast('A designer session is already open — close its tab first', false); return; }
         var ed = activeEd();
         var pos = ed.getPosition();
@@ -1219,6 +1229,29 @@
     }
     function cmdToggleBookmark() { toggleBookmarkAt(activeEd().getPosition().lineNumber); }
 
+    // ----- Breakpoints (overlay/file mode) -----
+    // Gutter-margin click toggles a breakpoint; the C# host owns the truth (the IDE's DebuggerService,
+    // which both the native Clarion debugger and the CA Debugger read) and pushes the current line set
+    // back via 'setBreakpoints'. We only render what the host tells us — no optimistic paint.
+    var breakpointsEnabled = false;
+    var designerEnabled = false;   // overlay: allow Ctrl+D on plain source files (.clw/.inc/.tpl/.tpw)
+    var breakpointDecos = [];
+    function breakpointDecoOption(ln) {
+        return { range: new monaco.Range(ln, 1, ln, 1),
+            options: { glyphMarginClassName: 'breakpoint-glyph', glyphMarginHoverMessage: { value: 'Breakpoint' }, stickiness: 1 } };
+    }
+    function setBreakpointLines(lines) {
+        var model = editor.getModel();
+        if (!model) return;
+        var lc = model.getLineCount(), decos = [];
+        (lines || []).forEach(function (ln) { if (ln >= 1 && ln <= lc) decos.push(breakpointDecoOption(ln)); });
+        breakpointDecos = model.deltaDecorations(breakpointDecos, decos);   // model-level → both panes
+    }
+    function requestToggleBreakpoint(ln) {
+        if (!ln || ln < 1) return;
+        postToHost({ action: 'toggleBreakpoint', line: ln });   // host toggles via DebuggerService, pushes setBreakpoints back
+    }
+
     // #17 — persist bookmark lines (debounced) whenever they change, so closing/reopening the tab keeps
     // them. Only meaningful once the page knows its procedure (saveEnabled or a restored set); the host
     // ignores writes when the procedure scope is empty.
@@ -1273,7 +1306,9 @@
         ed.onMouseDown(function (e) {
             if (e.target && e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN &&
                 e.target.position && e.target.position.lineNumber) {
-                toggleBookmarkAt(e.target.position.lineNumber);
+                // Overlay: the gutter sets breakpoints (VS-style); bookmarks move to Ctrl+F2.
+                if (breakpointsEnabled) requestToggleBreakpoint(e.target.position.lineNumber);
+                else toggleBookmarkAt(e.target.position.lineNumber);
             }
         });
     }
@@ -2770,6 +2805,8 @@
                 applyDesignerSplice(msg.text);
             } else if (msg.type === 'designerClosed') {
                 onDesignerClosed(msg);
+            } else if (msg.type === 'setBreakpoints') {
+                setBreakpointLines(msg.lines);
             } else if (msg.type === 'applyHistory') {
                 if (msg.find) replaceArray(findHistory, msg.find);
                 if (msg.replace) replaceArray(replHistory, msg.replace);

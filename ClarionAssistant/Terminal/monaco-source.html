@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CA Source (Monaco)</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; overflow: hidden; background: #eff1f5; }
+    #editor { position: absolute; inset: 0; }
+    #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+        font-family: 'Segoe UI', Tahoma, sans-serif; color: #8c8fa1; font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="loading">Loading Monaco…</div>
+<div id="editor"></div>
+<script>
+    // Phase-1 minimal source view. Read-only display of a Clarion source buffer hosted as an
+    // overlay over the live IDE editor. Caret/document two-way sync is Phase 2. Bootstrap mirrors
+    // monaco-embeditor.html (jsdelivr, pinned version) for consistency.
+    var MONACO_VERSION = "0.52.2";
+    var MONACO_BASE = "https://cdn.jsdelivr.net/npm/monaco-editor@" + MONACO_VERSION + "/min/";
+
+    var editor = null;
+    var pending = null;   // content delivered before Monaco finished loading
+
+    function post(msg) {
+        try { window.chrome.webview.postMessage(JSON.stringify(msg)); } catch (e) {}
+    }
+
+    function applyContent(c) {
+        if (!editor) { pending = c; return; }
+        var lang = (c && c.language) ? c.language : 'plaintext';
+        // Phase 1 keeps highlighting simple: only use a language Monaco already knows, else plaintext.
+        var known = monaco.languages.getLanguages().some(function (l) { return l.id === lang; });
+        var model = editor.getModel();
+        monaco.editor.setModelLanguage(model, known ? lang : 'plaintext');
+        editor.setValue((c && c.text) ? c.text : '');
+        editor.updateOptions({ readOnly: !(c && c.readOnly === false) });
+    }
+
+    window.chrome.webview.addEventListener('message', function (ev) {
+        // PostWebMessageAsJson delivers ev.data as an already-parsed object; PostWebMessageAsString
+        // delivers a string. Accept either so the host can use the project's AsJson convention.
+        var msg;
+        try { msg = (typeof ev.data === 'string') ? JSON.parse(ev.data) : ev.data; } catch (e) { return; }
+        if (!msg || !msg.type) return;
+        if (msg.type === 'setContent') applyContent(msg);
+    });
+
+    function bootMonaco() {
+        var loader = document.createElement('script');
+        loader.src = MONACO_BASE + "vs/loader.js";
+        loader.onload = function () {
+            require.config({ paths: { vs: MONACO_BASE + "vs" } });
+            require(['vs/editor/editor.main'], function () {
+                editor = monaco.editor.create(document.getElementById('editor'), {
+                    value: '',
+                    language: 'plaintext',
+                    readOnly: true,
+                    automaticLayout: true,
+                    minimap: { enabled: false },
+                    fontSize: 13,
+                    scrollBeyondLastLine: false
+                });
+                var el = document.getElementById('loading'); if (el) el.style.display = 'none';
+                if (pending) { applyContent(pending); pending = null; }
+                post({ type: 'ready' });
+            });
+        };
+        loader.onerror = function () {
+            var el = document.getElementById('loading');
+            if (el) el.textContent = 'Failed to load Monaco from CDN.';
+            post({ type: 'loadError' });
+        };
+        document.head.appendChild(loader);
+    }
+
+    bootMonaco();
+</script>
+</body>
+</html>
