@@ -20,10 +20,21 @@ namespace ClarionAssistant
     /// </summary>
     public class ModernDataPad : AbstractPadContent
     {
+        // Live-instance registry so ShutdownService can dispose this pad's WebView2 ON THE UI THREAD
+        // BEFORE native IDE teardown (the WebView2 <-> native focus-deadlock precedent). The SharpDevelop
+        // pad lifecycle alone doesn't guarantee Dispose runs before native teardown, so we mirror the
+        // ModernEmbeditorViewContent pattern. (Practically a singleton pad, but a List handles any count.)
+        private static readonly List<ModernDataPad> _instances = new List<ModernDataPad>();
+
         private Panel _panel;
         private WebView2 _webView;
         private bool _isInitialized;
         private bool _isInitializing;
+
+        public ModernDataPad()
+        {
+            lock (_instances) { _instances.Add(this); }
+        }
 
         public override Control Control
         {
@@ -1075,12 +1086,25 @@ namespace ClarionAssistant
 
         public override void Dispose()
         {
+            lock (_instances) { _instances.Remove(this); }
             ClearAddRefreshTimers();
             if (_settingsWindow != null && !_settingsWindow.IsDisposed) { try { _settingsWindow.Close(); } catch { } _settingsWindow = null; }
             if (_autoTimer != null) { _autoTimer.Stop(); _autoTimer.Dispose(); _autoTimer = null; }
             if (_webView != null) { _webView.Dispose(); _webView = null; }
             if (_panel != null) { _panel.Dispose(); _panel = null; }
             base.Dispose();
+        }
+
+        /// <summary>Dispose every live ModernDataPad's WebView2 on the UI thread before native IDE teardown.
+        /// Called from ShutdownService.Terminate(). Idempotent + exception-swallowing per instance.</summary>
+        public static void DisposeAllForShutdown()
+        {
+            List<ModernDataPad> snapshot;
+            lock (_instances) { snapshot = new List<ModernDataPad>(_instances); }
+            foreach (var inst in snapshot)
+            {
+                try { inst.Dispose(); } catch { }
+            }
         }
 
         private static string GetHtmlPath()

@@ -14,6 +14,12 @@ namespace ClarionAssistant
 {
     public class AssistantChatControl : UserControl
     {
+        // Live-instance registry so ShutdownService can dispose this control's WebView2s ON THE UI THREAD
+        // BEFORE native IDE teardown. Disposing the control chains to _header (HeaderWebView = HUD) and
+        // _homeView (HomeWebView), and _tabManager disposes its tab content (SchemaSourcesView etc.).
+        // Mirrors the ModernEmbeditorViewContent pattern. (Practically a singleton chat pad.)
+        private static readonly List<AssistantChatControl> _instances = new List<AssistantChatControl>();
+
         // Tab system (MultiTerminal Panel-based pattern)
         private TabManager _tabManager;
         private Panel _tabStrip;    // custom-painted tab header strip (hidden when 1 tab)
@@ -85,6 +91,7 @@ namespace ClarionAssistant
 
         public AssistantChatControl()
         {
+            lock (_instances) { _instances.Add(this); }
             _editorService = new EditorService();
             _parser = new ClarionClassParser();
             _settings = new SettingsService();
@@ -3655,8 +3662,22 @@ namespace ClarionAssistant
 
         #endregion
 
+        /// <summary>Dispose every live AssistantChatControl on the UI thread before native IDE teardown.
+        /// Called from ShutdownService.Terminate(). Disposing the control tears down its WebView2s
+        /// (_header/HUD, _homeView) and tab content. Idempotent + exception-swallowing per instance.</summary>
+        public static void DisposeAllForShutdown()
+        {
+            List<AssistantChatControl> snapshot;
+            lock (_instances) { snapshot = new List<AssistantChatControl>(_instances); }
+            foreach (var inst in snapshot)
+            {
+                try { inst.Dispose(); } catch { }
+            }
+        }
+
         protected override void Dispose(bool disposing)
         {
+            lock (_instances) { _instances.Remove(this); }
             if (disposing)
             {
                 if (_tabManager != null) _tabManager.Dispose();

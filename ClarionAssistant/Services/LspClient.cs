@@ -273,6 +273,72 @@ namespace ClarionAssistant.Services
             return "node";
         }
 
+        /// <summary>
+        /// Fast, no-handshake kill of the live LSP node.exe (and any child tree) for the IDE
+        /// shutdown fast-path. Unlike Stop(), this skips the graceful shutdown/exit JSON-RPC
+        /// notifications and their ~400ms of Thread.Sleeps — at shutdown we just need the node
+        /// handle GONE so it can't keep the IDE alive. Best-effort; swallows all errors.
+        ///
+        /// Called (bounded) from ShutdownService.Terminate(). Operates on the static Active
+        /// client; no-op if no server is running. SharedLspBridge spawns no process of its own
+        /// (it only WebSocket-connects to the shared server), so this is the only node owner.
+        /// </summary>
+        public static void KillForShutdown()
+        {
+            var inst = Active;
+            if (inst == null) return;
+            inst._running = false;
+
+            // Claim the Process atomically so a concurrent Stop() (graceful path, reachable during teardown)
+            // can't also operate on the same handle — once we've taken it, Stop()'s _process null-guards make
+            // it a no-op. Prevents racing .Kill()/.HasExited on one Process object.
+            var p = Interlocked.Exchange(ref inst._process, null);
+            if (p == null) { if (ReferenceEquals(Active, inst)) Active = null; return; }
+
+            try
+            {
+                if (!p.HasExited)
+                {
+                    int pid = p.Id;
+                    // Kill the whole tree first (node can spawn workers); taskkill /T reaps children. Resolve
+                    // taskkill by its ABSOLUTE System32 path — never the bare name — so a rogue taskkill.exe on
+                    // PATH or the current directory can't be executed at shutdown (CWE-426 untrusted search path).
+                    try
+                    {
+                        string taskkillExe = Path.Combine(
+                            Environment.GetFolderPath(Environment.SpecialFolder.System), "taskkill.exe");
+                        var psi = new ProcessStartInfo(taskkillExe, "/PID " + pid + " /T /F")
+                        {
+                            UseShellExecute = false,
+                            CreateNoWindow = true
+                        };
+                        var tk = Process.Start(psi);
+                        if (tk != null) tk.WaitForExit(1500);
+                    }
+                    catch { }
+                    // Fallback: if taskkill didn't take, kill the root directly.
+                    try { if (!p.HasExited) p.Kill(); } catch { }
+                    // taskkill exiting != the tree is gone. Confirm the ROOT actually exited; if it didn't,
+                    // log it so a real leak is visible in verify (the OS still reclaims at process exit).
+                    try { p.WaitForExit(500); } catch { }
+                    try
+                    {
+                        if (!p.HasExited)
+                            System.Diagnostics.Debug.WriteLine("[Shutdown] LSP kill UNCONFIRMED — node pid " + pid + " may survive");
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("[Shutdown] LSP KillForShutdown: " + ex.Message);
+            }
+
+            // Deliberately skip the diagnostics ManualResetEvent cleanup that Stop() does — the process is
+            // force-exiting and the OS reclaims those handles; the graceful Stop() path is where that matters.
+            if (ReferenceEquals(Active, inst)) Active = null;
+        }
+
         public void Stop()
         {
             _running = false;
