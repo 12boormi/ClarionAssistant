@@ -45,6 +45,7 @@ namespace ClarionAssistant
         private Panel _cover;            // opaque shim that hides the native editor until Monaco paints
         private ICSharpCode.TextEditor.TextEditorControl _hostEditor;   // the live editor we mirror
         private string _overlayTitle = "Clarion Source";
+        private string _filePath;        // the source file we edit (from the native editor), saved to disk by Monaco
 
         // Monaco's loading background (#eff1f5) — the cover matches it so the swap to Monaco is seamless.
         private static readonly Color CoverColor = Color.FromArgb(0xEF, 0xF1, 0xF5);
@@ -154,6 +155,12 @@ namespace ClarionAssistant
             try
             {
                 if (_editor == null || _editor.TempDir == null) return;
+
+                // Resolve the file path from the captured native editor — Monaco owns load/save to disk.
+                try { _filePath = (_hostEditor != null ? _hostEditor.FileName : null) ?? _filePath; }
+                catch (Exception fex) { MonacoSpikeLog.Write("overlay filename error: " + fex.Message); }
+                if (!string.IsNullOrEmpty(_filePath)) _overlayTitle = Path.GetFileName(_filePath);
+
                 string text = "";
                 try { if (_hostEditor != null && _hostEditor.Document != null) text = _hostEditor.Document.TextContent ?? ""; }
                 catch (Exception rex) { MonacoSpikeLog.Write("overlay read document error: " + rex.Message); }
@@ -170,9 +177,9 @@ namespace ClarionAssistant
                     + "\"language\":\"clarion\","
                     + "\"isDark\":true,"
                     + "\"fileMode\":true,"
-                    + "\"readOnly\":true,"
-                    + "\"filePath\":\"\","
-                    + "\"saveEnabled\":false,"
+                    + "\"readOnly\":false,"
+                    + "\"filePath\":" + MonacoEditorControl.JsonString(_filePath ?? "") + ","
+                    + "\"saveEnabled\":true,"
                     + "\"editableRanges\":[],"
                     + "\"settings\":" + settingsJson + ","
                     + "\"findHistory\":[],\"replaceHistory\":[],\"procHistory\":[],"
@@ -180,13 +187,42 @@ namespace ClarionAssistant
                     + "\"bookmarks\":[],"
                     + "\"sourceUrl\":\"https://clarion-embeditor-data/source.txt\"}";
                 _editor.PostJson(json);
-                MonacoSpikeLog.Write("overlay setSource sent (fileMode read-only, " + text.Length + " chars)");
+                MonacoSpikeLog.Write("overlay setSource sent (fileMode editable, " + text.Length + " chars, file=" + (_filePath ?? "?") + ")");
             }
             catch (Exception ex) { MonacoSpikeLog.Write("overlay OnReady error: " + ex.Message); }
         }
 
-        // Read-only mirror: everything else is inert for this milestone.
-        void IMonacoEditorHost.OnSave(MonacoEditorControl editor, string rawJson) { }
+        // Monaco owns the buffer and saves straight to disk — the native editor underneath stays a clean,
+        // untouched shell (never edited → never dirty → no dueling save). It's just a file on disk.
+        void IMonacoEditorHost.OnSave(MonacoEditorControl editor, string rawJson)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(_filePath)) { editor.PostSaveResult(false, "No file path for this editor."); return; }
+
+                var data = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }
+                    .DeserializeObject(rawJson) as System.Collections.Generic.Dictionary<string, object>;
+                string text = (data != null && data.ContainsKey("text")) ? (data["text"] as string ?? "") : "";
+                long seq = 0;
+                try { if (data != null && data.ContainsKey("seq")) seq = Convert.ToInt64(data["seq"]); } catch { }
+
+                // Clarion source is CRLF; normalize whatever Monaco sent. Preserve the file's load encoding.
+                string normalized = text.Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\r\n");
+                Encoding enc = null;
+                try { enc = _hostEditor != null ? _hostEditor.Encoding : null; } catch { }
+                File.WriteAllText(_filePath, normalized, enc ?? Encoding.UTF8);
+
+                editor.PostSaveResult(true, "Saved", seq);
+                MonacoSpikeLog.Write("overlay saved to disk: " + _filePath + " (" + normalized.Length + " chars, seq " + seq + ")");
+            }
+            catch (Exception ex)
+            {
+                MonacoSpikeLog.Write("overlay save error: " + ex.Message);
+                try { editor.PostSaveResult(false, "Save failed: " + ex.Message); } catch { }
+            }
+        }
+
+        // The rest stay inert for now (Step 6 wires Ctrl+D through the embeditor's openDesigner path).
         void IMonacoEditorHost.OnClipboard(MonacoEditorControl editor, string rawJson) { }
         void IMonacoEditorHost.OnCompletion(MonacoEditorControl editor, string rawJson) { }
         void IMonacoEditorHost.OnHover(MonacoEditorControl editor, string rawJson) { }
