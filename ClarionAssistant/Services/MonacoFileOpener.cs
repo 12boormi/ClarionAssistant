@@ -2,13 +2,12 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using ClarionAssistant.Terminal;
-using ICSharpCode.SharpDevelop.Gui;
 
 namespace ClarionAssistant.Services
 {
     /// <summary>
-    /// THE single choke point for opening files into the CA (Monaco) editor. Every open routes through
+    /// THE single choke point for opening files into the IDE editor (Monaco by default for Clarion source,
+    /// via MonacoClarionEditorDisplayBinding). Every open routes through
     /// <see cref="OpenFile"/> so recents + last-folder get recorded in <see cref="ExplorerRecentsStore"/>
     /// in exactly one place — callers (Tools menu, Explorer panel, etc.) never touch the store directly.
     ///
@@ -38,24 +37,34 @@ namespace ClarionAssistant.Services
         }
 
         /// <summary>
-        /// Open a single file into a Monaco tab (focusing the existing tab if already open), then record
-        /// the open + its folder. Re-opening an already-open file just activates its tab. A path that does
-        /// not exist on disk is ignored (never opened, never recorded) — this also stops a WebView2 drop of a
-        /// bare filename (no real path) from creating a broken tab + a junk recents entry.
+        /// Open a single file through the IDE's standard file-open pipeline, then record the open + its folder.
+        /// We route via <c>FileService.OpenFile</c> rather than constructing a standalone CA Monaco tab so the
+        /// registered DisplayBinding decides the editor: the Monaco source editor is now the DEFAULT for Clarion
+        /// source (<c>MonacoClarionEditorDisplayBinding</c>), so the file still lands in Monaco — but inside the
+        /// IDE's own document/editor lifecycle (Ctrl+D structure designer, save/close, focus-if-already-open),
+        /// which is smoother and more Clarion-compatible than a bespoke tab. The IDE focuses the existing
+        /// document if the file is already open, so we don't dedup here.
+        ///
+        /// A path that does not exist on disk is ignored (never opened, never recorded) — this also stops a
+        /// WebView2 drop of a bare filename (no real path) from creating a broken tab + a junk recents entry.
+        /// <paramref name="isDark"/> is retained for caller compatibility but no longer used at open time — the
+        /// editor owns its own theme.
         /// </summary>
-        /// <returns>true if the file was opened or focused; false if it was missing/invalid.</returns>
+        /// <returns>true if the file was handed to the IDE to open; false if it was missing/invalid.</returns>
         public static bool OpenFile(string path, bool isDark)
         {
             if (string.IsNullOrEmpty(path) || !File.Exists(path)) return false;
 
-            var existing = ModernEmbeditorViewContent.FindByFilePath(path);
-            if (existing != null)
+            try
             {
-                existing.ActivateTab();
+                // IDE-standard open → routes to MonacoClarionEditorDisplayBinding for Clarion source (Monaco by
+                // default); focuses the tab if the file is already open.
+                ICSharpCode.SharpDevelop.FileService.OpenFile(path);
             }
-            else
+            catch (Exception ex)
             {
-                WorkbenchSingleton.Workbench.ShowView(new ModernEmbeditorViewContent(path, isDark));
+                System.Diagnostics.Debug.WriteLine("[MonacoFileOpener] OpenFile: " + ex.Message);
+                return false;
             }
 
             // Record AFTER a successful open so a failed/ignored open doesn't pollute recents.
