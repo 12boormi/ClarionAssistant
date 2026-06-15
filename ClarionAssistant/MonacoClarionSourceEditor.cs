@@ -271,6 +271,9 @@ namespace ClarionAssistant
         }
 
         // LSP/hybrid diagnostics — the page sends fileMode ranges [[1,lineCount]] (whole file editable).
+        // embedSlotChecks:true ALSO runs the structure-balance heuristic over the whole file (unmatched
+        // IF/LOOP/CASE/structure → squiggle), which file mode normally skips. John wants it for source
+        // editing; caveat = it can false-positive on declaration files (FILE/GROUP as param types).
         void IMonacoEditorHost.OnDiagnostics(MonacoEditorControl editor, string rawJson)
         {
             int reqId; string buffer; List<int[]> ranges;
@@ -278,7 +281,7 @@ namespace ClarionAssistant
             System.Threading.Tasks.Task.Run(() =>
             {
                 var markers = new List<Dictionary<string, object>>();
-                try { markers = ModernEmbeditorDiagnostics.Compute(_filePath, buffer ?? "", ranges, null, embedSlotChecks: false); }
+                try { markers = ModernEmbeditorDiagnostics.Compute(_filePath, buffer ?? "", ranges, null, embedSlotChecks: true); }
                 catch (Exception ex) { MonacoSpikeLog.Write("overlay diagnostics error: " + ex.Message); }
                 editor.PostResponse(reqId, new Dictionary<string, object> { { "markers", markers } });
             });
