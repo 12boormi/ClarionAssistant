@@ -283,6 +283,15 @@ namespace ClarionAssistant
                 try { settingsJson = new JavaScriptSerializer().Serialize(ModernEmbeditorSettings.Load().ToDict()); }
                 catch { settingsJson = "null"; }
 
+                // If a host-driven navigation (CA Debugger / breakpoint click via MonacoSourceNavigator) is parked
+                // for this file, OPEN AT that line by seeding it INTO setSource's cursor — restoreEmbedState then
+                // positions + centers the caret as part of the initial load. A separate revealLine sent right
+                // after setSource races the async content fetch on a COLD open (lands at the top); seeding the
+                // cursor removes the race. (Already-open files reveal on a settled model, so they were fine.)
+                int navLine = 0, navCol = 1;
+                try { int nl, nc; if (MonacoSourceNavigator.TryConsumePending(_filePath, out nl, out nc)) { navLine = nl; navCol = nc; } }
+                catch (Exception nex) { MonacoSpikeLog.Write("overlay OnReady consume-pending error: " + nex.Message); }
+
                 string json = "{\"type\":\"setSource\","
                     + "\"title\":" + MonacoEditorControl.JsonString(_overlayTitle) + ","
                     + "\"language\":\"clarion\","
@@ -296,20 +305,21 @@ namespace ClarionAssistant
                     + "\"editableRanges\":[],"
                     + "\"settings\":" + settingsJson + ","
                     + "\"findHistory\":[],\"replaceHistory\":[],\"procHistory\":[],"
-                    + "\"cursorLine\":0,\"cursorColumn\":0,"
+                    + "\"cursorLine\":" + navLine + ",\"cursorColumn\":" + navCol + ","
                     + "\"bookmarks\":[],"
                     + "\"sourceUrl\":\"https://clarion-embeditor-data/source.txt\"}";
                 _editor.PostJson(json);
-                MonacoSpikeLog.Write("overlay setSource sent (fileMode editable, " + text.Length + " chars, file=" + (_filePath ?? "?") + ")");
+                MonacoSpikeLog.Write("overlay setSource sent (fileMode editable, " + text.Length + " chars, file=" + (_filePath ?? "?") + (navLine >= 1 ? (", nav->line " + navLine) : "") + ")");
                 PushBreakpoints();   // paint any existing IDE breakpoints for this file
 
                 // The page can now be positioned. Re-register under the firm page-resolved path, flush any nav
-                // that was parked while loading, then drain a navigator request that arrived between capture
-                // and ready (debugger click on a cold file).
+                // that was parked while loading. The cold-open target is already seeded into setSource above; the
+                // RevealLine here is a redundant safety net (idempotent) for a nav that lands after this point.
                 _pageReady = true;
                 MonacoSourceNavigator.Register(_filePath, this);
                 if (_navPendingLine >= 1) { _editor.RevealLine(_navPendingLine, _navPendingCol); _navPendingLine = 0; }
-                ApplyPendingNavigation();
+                if (navLine >= 1) _editor.RevealLine(navLine, navCol);
+                else ApplyPendingNavigation();   // nothing seeded → drain any nav that arrived between capture and ready
             }
             catch (Exception ex) { MonacoSpikeLog.Write("overlay OnReady error: " + ex.Message); }
         }
