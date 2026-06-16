@@ -44,7 +44,8 @@ namespace ClarionAssistant
         // Phase-1 overlay (inert, read-only): a Monaco/WebView2 surface docked over the live text
         // area. Caret/document two-way sync is Phase 2 — for now we push the buffer once on load.
         private MonacoEditorControl _editor;   // reusable Monaco surface (converge step 4), docked over the native editor
-        private Panel _cover;            // opaque shim that hides the native editor until Monaco paints
+        private Panel _cover;            // opaque shim over the native editor + WebView2 init until Monaco paints
+        private Timer _coverSafety;      // backstop: drop the cover even if the page never signals nav-completed
         private ICSharpCode.TextEditor.TextEditorControl _hostEditor;   // the live editor we mirror
         private string _overlayTitle = "Clarion Source";
         private string _filePath;        // the source file we edit (from the native editor), saved to disk by Monaco
@@ -69,7 +70,10 @@ namespace ClarionAssistant
         private System.ComponentModel.CancelEventHandler _closingHandler;
         private bool _closeHooked;
 
-        // Monaco's loading background (#eff1f5) — the cover matches it so the swap to Monaco is seamless.
+        // Cover that hides the native editor until Monaco paints. Light (#eff1f5) to match the page's DEFAULT
+        // light theme. (It cannot hide the WebView2 itself — a native HWND always paints over WinForms siblings,
+        // so the on-load flash is fixed on the page side by applying the theme on first paint; this cover only
+        // keeps the native ClaTextAreaControl from peeking through underneath.)
         private static readonly Color CoverColor = Color.FromArgb(0xEF, 0xF1, 0xF5);
 
         public MonacoClarionEditor()
@@ -171,10 +175,20 @@ namespace ClarionAssistant
                 if (_editor != null) return;
                 // Reuse the rich embeditor Monaco surface (colorize/minimap/find/keymap come free) instead of
                 // the bespoke monaco-source.html page. We are its host; it renders a read-only fileMode mirror.
-                _editor = new MonacoEditorControl(this, true, "monaco-embeditor.html", "clarion-embeditor-data");
+                // isDark:false → the control backdrop + the WebView2 DefaultBackgroundColor are LIGHT, matching
+                // the page's default light theme (the page itself owns the actual light/dark choice via its
+                // persisted pref; this only sets the pre-paint backdrop so there's no dark flash on a light load).
+                _editor = new MonacoEditorControl(this, false, "monaco-embeditor.html", "clarion-embeditor-data");
                 host.Controls.Add(_editor);
                 _editor.BringToFront();
+                if (_cover != null) _cover.BringToFront();   // cover ABOVE the WebView2 until Monaco has painted
                 WireBreakpoints();   // keep Monaco's gutter in sync with IDE breakpoints
+
+                // Backstop: reveal Monaco after a few seconds even if OnEditorNavigationCompleted never arrives,
+                // so a failed load can never leave the cover stranded over a blank editor.
+                _coverSafety = new Timer { Interval = 6000 };
+                _coverSafety.Tick += (s, e) => RemoveCover();
+                _coverSafety.Start();
                 MonacoSpikeLog.Write("overlay MonacoEditorControl attached over host; awaiting ready");
             }
             catch (Exception ex) { MonacoSpikeLog.Write("AttachOverlay error: " + ex.Message); }
@@ -272,7 +286,7 @@ namespace ClarionAssistant
                 string json = "{\"type\":\"setSource\","
                     + "\"title\":" + MonacoEditorControl.JsonString(_overlayTitle) + ","
                     + "\"language\":\"clarion\","
-                    + "\"isDark\":true,"
+                    + "\"isDark\":false,"
                     + "\"fileMode\":true,"
                     + "\"readOnly\":false,"
                     + "\"breakpointsEnabled\":true,"
@@ -574,7 +588,7 @@ namespace ClarionAssistant
         }
         // 'Show designer' on the lock overlay → bring the scratch designer tab back to front.
         void IMonacoEditorHost.OnActivateDesigner(MonacoEditorControl editor) { StructureDesignerService.ActivateCurrent(_editor); }
-        void IMonacoEditorHost.OnEditorNavigationCompleted(MonacoEditorControl editor, bool success) { MonacoSpikeLog.Write("overlay nav completed success=" + success); }
+        void IMonacoEditorHost.OnEditorNavigationCompleted(MonacoEditorControl editor, bool success) { MonacoSpikeLog.Write("overlay nav completed success=" + success); RemoveCover(); }
         void IMonacoEditorHost.OnUnknownAction(MonacoEditorControl editor, string action, string rawJson)
         {
             if (action != "toggleBreakpoint") return;
@@ -748,6 +762,18 @@ namespace ClarionAssistant
                     _editor.Dispose();
                     _editor = null;
                 }
+                RemoveCover();
+            }
+            catch { }
+        }
+
+        // Reveal Monaco: drop the load cover and its backstop timer. Called once the page has painted
+        // (OnEditorNavigationCompleted), by the backstop timer, or on teardown. Idempotent.
+        private void RemoveCover()
+        {
+            try
+            {
+                if (_coverSafety != null) { _coverSafety.Stop(); _coverSafety.Dispose(); _coverSafety = null; }
                 if (_cover != null)
                 {
                     var cp = _cover.Parent;
@@ -756,7 +782,7 @@ namespace ClarionAssistant
                     _cover = null;
                 }
             }
-            catch { }
+            catch (Exception ex) { MonacoSpikeLog.Write("RemoveCover error: " + ex.Message); }
         }
 
         private void StopCaptureTimer()

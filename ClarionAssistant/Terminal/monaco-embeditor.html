@@ -418,7 +418,15 @@
     // persisted in localStorage and toggled from the toolbar. This wins over the host's IDE theme so the
     // editor stays the color the user picked regardless of the IDE's dark/light mode.
     var themePrefDark = false;
-    (function () { try { var v = localStorage.getItem('modernEmbeditor.themeDark'); if (v !== null) themePrefDark = (v === '1'); } catch (e) { } })();
+    (function () {
+        try { var v = localStorage.getItem('modernEmbeditor.themeDark'); if (v !== null) themePrefDark = (v === '1'); } catch (e) { }
+        // Apply the persisted theme to the document IMMEDIATELY — before Monaco initializes — so the page never
+        // shows its default-dark body for the ~1s Monaco takes to load (that was the on-load "black flash",
+        // most visible on a light theme). setTheme() still re-applies once Monaco is live.
+        try { document.documentElement.style.background = themePrefDark ? '#1e1e2e' : '#eff1f5'; } catch (e) { }
+        function applyEarlyTheme() { try { document.body.classList.toggle('light', !themePrefDark); } catch (e) { } }
+        if (document.body) applyEarlyTheme(); else document.addEventListener('DOMContentLoaded', applyEarlyTheme);
+    })();
 
     function updateThemeBtn() {
         var b = document.getElementById('themeBtn');

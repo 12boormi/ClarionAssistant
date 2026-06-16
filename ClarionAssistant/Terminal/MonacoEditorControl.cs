@@ -142,7 +142,9 @@ namespace ClarionAssistant.Terminal
             BackColor = isDark ? Color.FromArgb(30, 30, 46) : Color.FromArgb(239, 241, 245);
 
             // Plain WebView2 — Monaco's native mouseWheelZoom owns Ctrl+wheel inside the renderer.
-            _webView = new WebView2 { Dock = DockStyle.Fill };
+            // DefaultBackgroundColor = the themed backdrop so the WebView2 surface shows the editor's colour
+            // (not a black/white compositor flash) before Monaco's first paint.
+            _webView = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = BackColor };
             Controls.Add(_webView);
 
             // Init when the panel handle is realized (the WebView2 can only EnsureCoreWebView2 then).
