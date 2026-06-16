@@ -333,6 +333,11 @@
     <div id="loading">Loading editor…</div>
     <div id="toast"></div>
 
+<!-- Shared Clarion language registration (grammar + monarch). Cache-busted via Date.now()
+     so iterative IDE testing never sees a stale copy; document.write keeps it synchronous
+     and ordered before the main inline script below. -->
+<script>document.write('<script src="clarion-language.js?v=' + Date.now() + '"><\/script>');</script>
+
 <script>
     // ----- Constants (must match ModernEmbeditorViewContent.cs) -----
     var MONACO_VERSION = "0.52.2";
@@ -476,6 +481,15 @@
         loader.onload = function () {
             require.config({ paths: { vs: MONACO_BASE + "vs" } });
             require(['vs/editor/editor.main'], function () {
+                // Hard dependency on the shared clarion-language.js loaded above. If it failed to load
+                // (missing / 404 / parse error), these globals are undefined and the calls below would throw
+                // a ReferenceError here — before monaco.editor.create — leaving a silent "Loading editor…"
+                // hang (host 'ready' never fires). Fail loud with a clear message instead.
+                if (typeof registerClarionLanguage !== 'function' || typeof registerClarionFolding !== 'function') {
+                    var le = document.getElementById('loading');
+                    if (le) { le.style.display = 'block'; le.textContent = 'Failed to load clarion-language.js — the Clarion editor cannot start. Redeploy so the .js ships alongside this HTML.'; }
+                    return;
+                }
                 if (!monaco.languages.getLanguages().some(function (l) { return l.id === 'clarion'; })) {
                     monaco.languages.register({ id: 'clarion' });
                     registerClarionLanguage();
@@ -493,6 +507,13 @@
                     mouseWheelZoom: true,   // Ctrl+wheel zooms the editor font (native Monaco)
                     renderWhitespace: 'selection',
                     scrollBeyondLastLine: false,
+                    // Pin the enclosing PROCEDURE/ROUTINE/structure header to the top while scrolling.
+                    // Sticky scroll derives scopes from the Clarion folding ranges (registerClarionFolding).
+                    stickyScroll: { enabled: true },
+                    // Multi-cursor: Alt+Click adds a caret; Ctrl+Alt+Up/Down add carets above/below.
+                    // Pinned explicitly because this editor heavily customizes keybindings — the custom
+                    // capture-phase dispatcher passes these chords through untouched (not in EDITOR_COMMANDS).
+                    multiCursorModifier: 'alt',
                     // LSP-backed completion (M3). Use our provider only — no generic word suggestions.
                     quickSuggestions: true,
                     suggestOnTriggerCharacters: true,
@@ -515,6 +536,7 @@
                 // is current even if the user clicks the tab's X before the 600ms debounce fires. (pipeline CRIT)
                 editor.onDidBlurEditorText(function () { if (fileMode && isDirty) pushFileState(); });
                 editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, doSave);
+                installCommandPalette(editor); // F1 / Ctrl+Shift+P open Monaco's quick-command palette
                 installFindKeyInterceptor();   // capture-phase Ctrl+F/Ctrl+H/F3 — beats Monaco's stock widgets
                 rebuildChordMap();             // seed the binding map from defaults (settings refine it later)
                 installKeyBindings();          // capture-phase dispatcher for all rebindable Clarion editor keys
@@ -914,6 +936,18 @@
             ev.stopImmediatePropagation();
             try { cmd.run(); } catch (e) { /* never let a command break the editor */ }
         }, true);   // capture phase — runs after the Find interceptor (installed first), ahead of Monaco
+    }
+
+    // Command palette: Monaco's standalone quick-command picker (editor.action.quickCommand). Bound per
+    // editor so it works in the split pane too. F1 is the Monaco default, but the Clarion IDE host may
+    // grab it as a global Help accelerator before WebView2 sees it — so we ALSO bind Ctrl+Shift+P (the
+    // universal command-palette chord, free of any Help collision). Both chords pass through the capture
+    // dispatcher untouched (neither is in EDITOR_COMMANDS) and open the picker on the focused editor.
+    function installCommandPalette(ed) {
+        if (!ed) return;
+        var open = function () { try { ed.trigger('keyboard', 'editor.action.quickCommand', null); } catch (e) { } };
+        ed.addCommand(monaco.KeyCode.F1, open);
+        ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyP, open);
     }
 
     function editGuardToast() { showToast('Editable slots only', false); }
@@ -1384,6 +1418,8 @@
             mouseWheelZoom: true,
             renderWhitespace: 'selection',
             scrollBeyondLastLine: false,
+            stickyScroll: { enabled: true },   // pin enclosing scope header (split pane; same as primary)
+            multiCursorModifier: 'alt',        // Alt+Click / Ctrl+Alt+Up-Down carets (split pane; same as primary)
             quickSuggestions: true,
             suggestOnTriggerCharacters: true,
             wordBasedSuggestions: 'off',
@@ -1406,6 +1442,7 @@
         document.body.classList.add('split');
         editor2 = monaco.editor.create(document.getElementById('editor2'), editorOptionsForSplit());
         editor2.onDidFocusEditorText(function () { activeEditor = editor2; });
+        installCommandPalette(editor2); // F1 / Ctrl+Shift+P in the split pane too
         installDropInsert(editor2);    // accept Data-pad drops in the split pane too
         wireGlyphBookmark(editor2);
         installNavTracking(editor2);   // cursor jumps in the split pane feed the shared history (#14)
@@ -1801,54 +1838,8 @@
         diagTimer = setTimeout(refreshDiagnostics, 600);
     }
 
-    // Clarion code folding: data/control structures close with END (or a lone '.'); PROCEDURE and
-    // ROUTINE have no END, so they fold to the next ROUTINE/PROCEDURE boundary (or end of buffer).
-    function registerClarionFolding() {
-        var STRUCT = /\b(GROUP|QUEUE|RECORD|FILE|VIEW|REPORT|WINDOW|APPLICATION|MENUBAR|MENU|TOOLBAR|SHEET|TAB|OPTION|CLASS|INTERFACE|MAP|MODULE|ITEMIZE|JOIN|LOOP|CASE|BEGIN|EXECUTE)\b/;
-        monaco.languages.registerFoldingRangeProvider('clarion', {
-            provideFoldingRanges: function (model) {
-                var ranges = [];
-                var stack = [];
-                var n = model.getLineCount();
-                var lastProc = -1, lastRoutine = -1;
-                for (var i = 1; i <= n; i++) {
-                    var code = model.getLineContent(i).replace(/!.*$/, '').trim(); // strip line comment
-                    if (code === '') continue;
-                    var u = code.toUpperCase();
-
-                    if (/^END\b/.test(u) || u === '.') {            // close most-recent structure
-                        if (stack.length) {
-                            var open = stack.pop();
-                            if (i > open) ranges.push({ start: open, end: i });
-                        }
-                        continue;
-                    }
-                    if (/(^|\s)PROCEDURE\b/.test(u)) {              // procedure boundary
-                        if (lastRoutine !== -1) { if (i - 1 > lastRoutine) ranges.push({ start: lastRoutine, end: i - 1 }); lastRoutine = -1; }
-                        if (lastProc !== -1 && i - 1 > lastProc) ranges.push({ start: lastProc, end: i - 1 });
-                        lastProc = i;
-                        continue;
-                    }
-                    if (/(^|\s)ROUTINE\b/.test(u)) {               // routine boundary
-                        if (lastRoutine !== -1 && i - 1 > lastRoutine) ranges.push({ start: lastRoutine, end: i - 1 });
-                        lastRoutine = i;
-                        continue;
-                    }
-                    if (STRUCT.test(u)) { stack.push(i); continue; } // GROUP/QUEUE/LOOP/CASE/...
-                    if (/^IF\b/.test(u)) {                          // block IF only (skip one-liners)
-                        var thenIdx = u.indexOf(' THEN');
-                        var afterThen = thenIdx >= 0 ? code.substring(thenIdx + 5).trim() : '';
-                        var oneLiner = afterThen.length > 0 || /\.\s*$/.test(code);
-                        if (!oneLiner) stack.push(i);
-                        continue;
-                    }
-                }
-                if (lastRoutine !== -1 && n > lastRoutine) ranges.push({ start: lastRoutine, end: n });
-                if (lastProc !== -1 && n > lastProc) ranges.push({ start: lastProc, end: n });
-                return ranges;
-            }
-        });
-    }
+    // registerClarionFolding() now lives in the shared clarion-language.js (loaded above) so the
+    // embeditor and the diff editor fold from ONE provider; it also feeds Monaco sticky-scroll scopes.
 
     // LSP-backed completion + hover, routed through the C# host to the Clarion language server.
     function registerClarionProviders() {
@@ -1878,59 +1869,9 @@
         });
     }
 
-    // Basic Clarion syntax highlighting (Monarch). Keyword set is intentionally compact for M1.
-    function registerClarionLanguage() {
-        monaco.languages.setLanguageConfiguration('clarion', {
-            comments: { lineComment: '!' },
-            brackets: [['(', ')'], ['[', ']'], ['{', '}']],
-            // Treat the Clarion prefix separator ':' as part of a word so double-click selects
-            // the whole prefixed name (Add:AddressID), not just the field part. This is Monaco's
-            // default wordPattern with ':' removed from the separator set. '.' stays a separator
-            // so SELF.Method still selects just 'Method'.
-            wordPattern: /(-?\d*\.\d\w*)|([^\`~!@#%^&*()\-=+\[{\]}\\|;'",.<>\/?\s]+)/g,
-            // Smart auto-indent on Enter (active when autoIndent='full'): indent the body of block
-            // structures, outdent on END / lone '.' / CASE & IF sub-keywords. The negative lookahead
-            // skips one-line forms that self-terminate with a trailing '.' (e.g. IF x THEN y.).
-            indentationRules: {
-                increaseIndentPattern: /^\s*(IF|LOOP|CASE|BEGIN|EXECUTE|GROUP|QUEUE|RECORD|FILE|VIEW|REPORT|WINDOW|APPLICATION|MENUBAR|MENU|TOOLBAR|SHEET|TAB|OPTION|CLASS|INTERFACE|MAP|MODULE|ITEMIZE|JOIN|OF|OROF|ELSE|ELSIF)\b(?![^!]*\.\s*$).*$/i,
-                decreaseIndentPattern: /^\s*(END\b|\.\s*$|OF\b|OROF\b|ELSE\b|ELSIF\b|UNTIL\b|WHILE\b)/i
-            }
-        });
-        monaco.languages.setMonarchTokensProvider('clarion', {
-            ignoreCase: true,
-            keywords: [
-                'PROGRAM', 'MEMBER', 'MAP', 'MODULE', 'CLASS', 'INTERFACE', 'PROCEDURE', 'FUNCTION',
-                'ROUTINE', 'CODE', 'DATA', 'END', 'RETURN', 'EXIT', 'IF', 'THEN', 'ELSE', 'ELSIF',
-                'CASE', 'OF', 'OROF', 'LOOP', 'WHILE', 'UNTIL', 'BREAK', 'CYCLE', 'DO', 'BEGIN',
-                'EXECUTE', 'GROUP', 'QUEUE', 'RECORD', 'FILE', 'VIEW', 'WINDOW', 'REPORT', 'MENU',
-                'MENUBAR', 'TOOLBAR', 'SHEET', 'TAB', 'OPTION', 'APPLICATION', 'DETAIL', 'HEADER',
-                'FOOTER', 'BREAK', 'FORM', 'SELF', 'PARENT', 'NEW', 'DISPOSE', 'THREAD', 'NULL',
-                'TRUE', 'FALSE', 'AND', 'OR', 'XOR', 'NOT', 'CHOOSE', 'OMIT', 'COMPILE', 'INCLUDE',
-                'EQUATE', 'ITEMIZE', 'TYPE', 'LIKE', 'DIM', 'OVER', 'NAME', 'PRE', 'STATIC', 'THREAD'
-            ],
-            types: [
-                'LONG', 'ULONG', 'SHORT', 'USHORT', 'BYTE', 'SIGNED', 'UNSIGNED', 'REAL', 'SREAL',
-                'DECIMAL', 'PDECIMAL', 'BFLOAT4', 'BFLOAT8', 'STRING', 'CSTRING', 'PSTRING', 'ASTRING',
-                'MEMO', 'BLOB', 'DATE', 'TIME', 'BOOL', 'ANY', 'LONGLONG', 'BIGINT', 'GROUP', 'QUEUE'
-            ],
-            tokenizer: {
-                root: [
-                    [/!.*$/, 'comment'],
-                    [/'(?:[^']|'')*'/, 'string'],
-                    [/\b\d+(?:\.\d+)?\b/, 'number'],
-                    [/\b[0-9A-Fa-f]+[Hh]\b/, 'number.hex'],
-                    [/[A-Za-z_][A-Za-z0-9_]*:/, 'type.identifier'],
-                    [/[A-Za-z_][A-Za-z0-9_]*/, {
-                        cases: {
-                            '@keywords': 'keyword',
-                            '@types': 'type',
-                            '@default': 'identifier'
-                        }
-                    }]
-                ]
-            }
-        });
-    }
+    // Clarion syntax highlighting (Monarch) + language configuration now live in the shared
+    // clarion-language.js (loaded above), so the embeditor and the diff editor highlight from
+    // ONE grammar source. registerClarionLanguage() is defined there.
 
     // ----- Editor settings (gear panel) -----
     // Settings arrive from the host on load (setSource) and on broadcast (applySettings, when another

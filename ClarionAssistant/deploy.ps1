@@ -87,6 +87,12 @@ $Items = @(
     "Microsoft.Web.WebView2.WinForms.dll"
     "Microsoft.Web.WebView2.Wpf.dll"
     "WebView2Loader.dll"
+    # DEPLOY INVARIANT: Terminal\ is copied as a whole folder, which is the ONLY safe way to ship the
+    # Monaco editor pages. monaco-embeditor.html and monaco-diff.html have a HARD runtime dependency on
+    # Terminal\clarion-language.js (the shared Clarion grammar + folding registration, task 04dd97f9) —
+    # if either HTML is hot-copied WITHOUT clarion-language.js, the editor fails to start (the pages now
+    # detect this and show a "Failed to load clarion-language.js" message instead of hanging). Never
+    # single-file hot-copy either HTML without also copying clarion-language.js.
     "Terminal"
     "TaskLifecycleBoard"
     "runtimes"

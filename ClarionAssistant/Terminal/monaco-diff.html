@@ -113,6 +113,11 @@
     <button class="cr-btn cancel-btn" onclick="onCancel()">Cancel</button>
 </div>
 
+<!-- Shared Clarion language registration (grammar + monarch). Cache-busted via Date.now()
+     so iterative IDE testing never sees a stale copy; document.write keeps it synchronous
+     and ordered before the main inline script below. -->
+<script>document.write('<script src="clarion-language.js?v=' + Date.now() + '"><\/script>');</script>
+
 <script>
     // ----- Constants (must match ModernEmbeditorViewContent.cs / monaco-embeditor.html) -----
     var MONACO_VERSION = "0.52.2";
@@ -224,9 +229,18 @@
         loader.onload = function () {
             require.config({ paths: { vs: MONACO_BASE + "vs" } });
             require(['vs/editor/editor.main'], function () {
+                // Hard dependency on the shared clarion-language.js loaded above. If it failed to load
+                // (missing / 404 / parse error), these globals are undefined and the calls below would throw
+                // a ReferenceError here — before createDiffEditor — leaving a silent "Loading…" hang. Fail loud.
+                if (typeof registerClarionLanguage !== 'function' || typeof registerClarionFolding !== 'function') {
+                    var le = document.getElementById('loading');
+                    if (le) { le.style.display = 'block'; le.textContent = 'Failed to load clarion-language.js — the Clarion diff editor cannot start. Redeploy so the .js ships alongside this HTML.'; }
+                    return;
+                }
                 if (!monaco.languages.getLanguages().some(function (l) { return l.id === 'clarion'; })) {
                     monaco.languages.register({ id: 'clarion' });
                     registerClarionLanguage();
+                    registerClarionFolding();   // Clarion-aware folds on both diff panes (shared provider)
                 }
                 diffEditor = monaco.editor.createDiffEditor(document.getElementById('diff-editor'), {
                     automaticLayout: true,
@@ -239,6 +253,8 @@
                     fontSize: savedFontSize,
                     fontFamily: savedFontFamily,
                     minimap: { enabled: true },
+                    folding: true,                    // Clarion structure folding (read-only, chevrons in the gutter)
+                    showFoldingControls: 'always',
                     scrollBeyondLastLine: false,
                     theme: themeDark ? 'vs-dark' : 'vs'
                 });
@@ -261,48 +277,9 @@
         document.head.appendChild(loader);
     }
 
-    // ===== Clarion syntax (copied from monaco-embeditor.html so both panes highlight identically) =====
-    function registerClarionLanguage() {
-        monaco.languages.setLanguageConfiguration('clarion', {
-            comments: { lineComment: '!' },
-            brackets: [['(', ')'], ['[', ']'], ['{', '}']],
-            wordPattern: /(-?\d*\.\d\w*)|([^\`~!@#%^&*()\-=+\[{\]}\\|;'",.<>\/?\s]+)/g
-        });
-        monaco.languages.setMonarchTokensProvider('clarion', {
-            ignoreCase: true,
-            keywords: [
-                'PROGRAM', 'MEMBER', 'MAP', 'MODULE', 'CLASS', 'INTERFACE', 'PROCEDURE', 'FUNCTION',
-                'ROUTINE', 'CODE', 'DATA', 'END', 'RETURN', 'EXIT', 'IF', 'THEN', 'ELSE', 'ELSIF',
-                'CASE', 'OF', 'OROF', 'LOOP', 'WHILE', 'UNTIL', 'BREAK', 'CYCLE', 'DO', 'BEGIN',
-                'EXECUTE', 'GROUP', 'QUEUE', 'RECORD', 'FILE', 'VIEW', 'WINDOW', 'REPORT', 'MENU',
-                'MENUBAR', 'TOOLBAR', 'SHEET', 'TAB', 'OPTION', 'APPLICATION', 'DETAIL', 'HEADER',
-                'FOOTER', 'BREAK', 'FORM', 'SELF', 'PARENT', 'NEW', 'DISPOSE', 'THREAD', 'NULL',
-                'TRUE', 'FALSE', 'AND', 'OR', 'XOR', 'NOT', 'CHOOSE', 'OMIT', 'COMPILE', 'INCLUDE',
-                'EQUATE', 'ITEMIZE', 'TYPE', 'LIKE', 'DIM', 'OVER', 'NAME', 'PRE', 'STATIC', 'THREAD'
-            ],
-            types: [
-                'LONG', 'ULONG', 'SHORT', 'USHORT', 'BYTE', 'SIGNED', 'UNSIGNED', 'REAL', 'SREAL',
-                'DECIMAL', 'PDECIMAL', 'BFLOAT4', 'BFLOAT8', 'STRING', 'CSTRING', 'PSTRING', 'ASTRING',
-                'MEMO', 'BLOB', 'DATE', 'TIME', 'BOOL', 'ANY', 'LONGLONG', 'BIGINT', 'GROUP', 'QUEUE'
-            ],
-            tokenizer: {
-                root: [
-                    [/!.*$/, 'comment'],
-                    [/'(?:[^']|'')*'/, 'string'],
-                    [/\b\d+(?:\.\d+)?\b/, 'number'],
-                    [/\b[0-9A-Fa-f]+[Hh]\b/, 'number.hex'],
-                    [/[A-Za-z_][A-Za-z0-9_]*:/, 'type.identifier'],
-                    [/[A-Za-z_][A-Za-z0-9_]*/, {
-                        cases: {
-                            '@keywords': 'keyword',
-                            '@types': 'type',
-                            '@default': 'identifier'
-                        }
-                    }]
-                ]
-            }
-        });
-    }
+    // ===== Clarion syntax =====
+    // registerClarionLanguage() now lives in the shared clarion-language.js (loaded above),
+    // so this pane and the embeditor highlight identically from ONE grammar source.
 
     // ===== Apply incoming diff data =====
     // Host sends raw original + modified text via virtual-host files; Monaco computes the diff.
